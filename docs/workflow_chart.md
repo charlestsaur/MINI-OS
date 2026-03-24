@@ -1,0 +1,173 @@
+# MINI-OS Workflows
+
+This document visualizes the core execution paths of MINI-OS using Mermaid diagrams, covering hardware drivers, filesystem internals, and kernel logic.
+
+## 1. Boot and Kernel Initialization
+
+This flow describes the transition from BIOS to the functional Shell.
+
+```mermaid
+graph TD
+    A[Power On / Reset] --> B[BIOS Loads Boot Sector LBA 0 to 0x7C00]
+    B --> C[Bootloader: Set 16-bit Segments & Stack]
+    C --> D[Bootloader: Load Kernel via INT 13h AH=42h to 0x8000]
+    D --> E[Bootloader: Define GDT - Null/Code/Data]
+    E --> F[Bootloader: Set CR0.PE & Far Jump to 0x08:init_pm]
+    F --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
+    G --> H[Kernel: FS Bootstrap]
+    H --> I{Superblock @ LBA 101 Valid?}
+    I -- No --> J[fs_format: Wipe Bitmaps/Inodes/Data]
+    I -- Yes --> K[Validate Root Inode @ Index 0]
+    K -- Invalid --> J
+    K -- Valid --> L[Set CWD Inode = 0]
+    J --> L
+    L --> M[fs_rebuild_cwd_path: Generate / string]
+    M --> N[Enter Shell REPL Loop]
+```
+
+## 2. Low-Level Disk I/O (ATA PIO LBA28)
+
+This section details the synchronous hardware handshake in `drivers.asm`. Note the distinct polling loops for BSY and DRQ status bits.
+
+```mermaid
+flowchart TD
+    Start([Call ATA I/O Routine]) --> WaitBSY1{Status Port 0x1F7:<br/>BSY == 0?}
+    WaitBSY1 -- No (Busy) --> WaitBSY1
+    WaitBSY1 -- Yes (Ready) --> Program[Program Task File Registers:<br/>0x1F2: Sector Count = 1<br/>0x1F3: LBA Low<br/>0x1F4: LBA Mid<br/>0x1F5: LBA High<br/>0x1F6: Drive/Head Select]
+    
+    Program --> IssueCmd[Write Command to 0x1F7:<br/>Read: 0x20 / Write: 0x30]
+    
+    IssueCmd --> WaitDRQ{Status Port 0x1F7:<br/>DRQ == 1?}
+    WaitDRQ -- No (Not Ready) --> WaitDRQ
+    WaitDRQ -- Yes (Ready) --> OpType{Operation Type?}
+    
+    OpType -- Read (0x20) --> DataIn[REP INSW:<br/>Read 256 words from 0x1F0]
+    DataIn --> Finish([Return])
+    
+    OpType -- Write (0x30) --> DataOut[REP OUTSW:<br/>Write 256 words to 0x1F0]
+    DataOut --> Flush[Issue Cache Flush:<br/>Write 0xE7 to 0x1F7]
+    Flush --> WaitBSY2{Status Port 0x1F7:<br/>BSY == 0?}
+    WaitBSY2 -- No (Pending) --> WaitBSY2
+    WaitBSY2 -- Yes (Complete) --> Finish
+```
+
+## 3. Path Resolution (`fs_resolve_path`)
+
+The mechanism used by `cd`, `ls`, `cat`, etc., to locate an object.
+
+```mermaid
+graph TD
+    A[Start Path String] --> B{Starts with '/'?}
+    B -- Yes --> C[Current Inode = 0 Root]
+    B -- No --> D[Current Inode = CWD]
+    C & D --> E[Extract next component via '/' delimiter]
+    E --> F{Component Empty?}
+    F -- Yes --> G[Return Current Inode Index]
+    F -- No --> H{Is '.'?}
+    H -- Yes --> E
+    H -- No --> I{Is '..'?}
+    I -- Yes --> J[Read Inode Metadata -> Get .parent]
+    J --> K[Current Inode = Parent Inode] --> E
+    I -- No --> L[fs_find_entry_in_dir: Linear scan of data blocks]
+    L --> M{Match Found?}
+    M -- Yes --> N[Current Inode = Entry.inode_idx] --> E
+    M -- No --> O[Return -1 Error]
+```
+
+## 4. File Creation (`touch`)
+
+Metadata allocation and directory entry synchronization.
+
+```mermaid
+graph TD
+    A[fs_split_parent_name] --> B{Parent Resolved?}
+    B -- No --> C[Return -4 Invalid Path]
+    B -- Yes --> D[fs_validate_name: No . or ..]
+    D -- Invalid --> C
+    D -- Valid --> E[fs_alloc_inode: Scan Inode Bitmap LBA 102]
+    E -- Full --> F[Return -2 No Inode]
+    E -- Success --> G[Initialize 64-byte Inode Buffer]
+    G --> H[fs_find_free_entry_in_dir]
+    H -- Success --> I[Write 32-byte Dir Entry to Parent Data Block]
+    H -- Full --> J[fs_expand_dir: Alloc new data block]
+    J --> I
+    I --> K[fs_write_inode: Commit to LBA 111+]
+    K --> L[Return 0 Success]
+```
+
+## 5. Rename and Move Logic (`mv`)
+
+The most complex operation in the filesystem (`fs_rename_path`).
+
+```mermaid
+graph TD
+    A[Resolve Source Path] --> B[Resolve Destination Parent]
+    B --> C{Dest exists?}
+    C -- Yes --> D[Return -2 Exists]
+    C -- No --> E{Source is Dir?}
+    E -- Yes --> F[fs_parent_contains_inode: Prevent recursive move]
+    F -- Cycle --> G[Return -3 Invalid Move]
+    F -- Safe --> H[Write New Dir Entry at Destination]
+    E -- No --> H
+    H --> I[Clear Old Dir Entry at Source]
+    I --> J[Read Inode Metadata]
+    J --> K[Update Inode.parent and Inode.name]
+    K --> L[fs_write_inode: Commit changes]
+    L --> M[Return Success]
+```
+
+## 6. Removal Logic (`rm`)
+
+Cleanup of data blocks and metadata.
+
+```mermaid
+graph TD
+    A[Resolve Target Path] --> B{Is Root 0?}
+    B -- Yes --> C[Return -3 Deny]
+    B -- No --> D{Is Directory?}
+    D -- Yes --> E[fs_is_dir_empty: Scan for entries]
+    E -- Not Empty --> F[Return -2 Not Empty]
+    E -- Empty --> G[Proceed]
+    D -- No --> G
+    G --> H[fs_free_inode_data_blocks: Scan Data Bitmap LBA 103-110]
+    H --> I[Clear Inode Bitmap bit]
+    I --> J[Zero Inode Entry on disk]
+    J --> K[Clear Dir Entry in Parent]
+    K --> L[Return Success]
+```
+
+## 7. CWD Path Rebuilding
+
+How the shell prompt (e.g., `/docs/work/`) is generated.
+
+```mermaid
+graph TD
+    A[Start with cwd_inode] --> B{Is Root 0?}
+    B -- Yes --> C[Path = /]
+    B -- No --> D[Collect inode index into stack/array]
+    D --> E[Read Inode -> Get Parent]
+    E --> F[Inode = Parent]
+    F --> G{Reached Root?}
+    G -- No --> D
+    G -- Yes --> H[Iterate collected indices in reverse]
+    H --> I[Read Inode -> Append .name to string]
+    I --> J[Append / to string]
+    J --> K[Finalize cwd_path buffer]
+```
+
+## 8. File Editing (`edit`)
+
+Single-sector text I/O flow.
+
+```mermaid
+graph TD
+    A[Resolve File Inode] --> B[kbd_read_text: Polling for ESC]
+    B --> C{Has Data Block?}
+    C -- No --> D[fs_alloc_data_block: Update Bitmap & Inode]
+    C -- Yes --> E[Prepare 512-byte Sector Buffer]
+    D --> E
+    E --> F[Copy Input to Buffer]
+    F --> G[ata_write_sector_lba28: Commit to Disk]
+    G --> H[Update Inode.size]
+    H --> I[fs_write_inode: Commit Metadata]
+```
