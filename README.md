@@ -13,7 +13,7 @@ Currently, MINI_OS is a very small x86 32-bit pure assembly operating system.
 
 (Use QEMU)
 
-👉 [workflow chart](docs/workflow_chart.md)
+👉 [Flowchart](docs/Flowchart.md)
 
 ## Current Features
 

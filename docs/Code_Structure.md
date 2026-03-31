@@ -11,6 +11,7 @@ This document only describes code/file responsibilities.
 
 - `OS_src/boot/real_machine_boot.asm`
   - alternative loader with EDD detection and CHS fallback logic
+  - This is the boot prepared for running on real hardware, but it hasn't succeeded yet (it might be a problem with my machine).
 
 ## 2. Kernel Entry and Global Constants
 
