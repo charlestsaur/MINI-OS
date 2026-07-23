@@ -81,6 +81,7 @@ tmp_mv_old_parent   dd 0
 tmp_mv_new_parent   dd 0
 tmp_mv_old_path     dd 0
 tmp_mv_new_path     dd 0
+saved_kernel_esp    dd 0
 
 kernel_start:
     cli
@@ -90,6 +91,7 @@ kernel_start:
     mov esi, msg_boot
     call vga_print
 
+    call idt_init
     call fs_bootstrap
     call fs_set_cwd_root
 
@@ -110,6 +112,7 @@ shell_loop:
     call shell_dispatch
     jmp shell_loop
 
+%include "OS_src/kernel/idt.asm"
 %include "OS_src/kernel/shell.asm"
 %include "OS_src/kernel/fs.asm"
 %include "OS_src/kernel/drivers.asm"
@@ -128,7 +131,7 @@ msg_prompt_suffix  db " > ", 0
 msg_ls             db "entries:", 10, 0
 msg_file_prefix    db " - ", 0
 
-msg_help           db "Commands: help, ls, pwd, cd <dir>, mkdir <dir>, touch <file>, cat <file>, edit <file>, rm <path>, mv <old> <new>, format", 10, 0
+msg_help           db "Commands: help, ls, pwd, cd <dir>, mkdir <dir>, touch <file>, cat <file>, edit <file>, rm <path>, mv <old> <new>, run <file>, format", 10, 0
 msg_unknown        db "Unknown command. Type 'help'.", 10, 0
 msg_not_found      db "Entry not found.", 10, 0
 msg_not_file       db "Target is not a regular file.", 10, 0
@@ -149,6 +152,7 @@ msg_usage_touch    db "Usage: touch <file>", 10, 0
 msg_usage_rm       db "Usage: rm <path>", 10, 0
 msg_usage_mv       db "Usage: mv <old> <new>", 10, 0
 msg_usage_edit     db "Usage: edit <file>", 10, 0
+msg_usage_run      db "Usage: run <file>", 10, 0
 
 msg_touch_ok       db "Created: ", 0
 msg_mkdir_ok       db "Directory created: ", 0
@@ -156,6 +160,8 @@ msg_rm_ok          db "Removed.", 10, 0
 msg_mv_ok          db "Renamed.", 10, 0
 msg_edit_prompt    db "Editor mode: Enter=new line, ESC=save and exit.", 10, 0
 msg_edit_ok        db "Saved.", 10, 0
+msg_app_start      db "MINI_OS: launching app...", 10, 0
+msg_app_finished   db "MINI_OS: app exited cleanly.", 10, 0
 
 cmd_help           db "help", 0
 cmd_ls             db "ls", 0
@@ -167,6 +173,7 @@ cmd_touch          db "touch", 0
 cmd_rm             db "rm", 0
 cmd_mv             db "mv", 0
 cmd_edit           db "edit", 0
+cmd_run            db "run", 0
 cmd_format         db "format", 0
 
 str_readme_name    db "README.TXT", 0
@@ -177,3 +184,4 @@ str_readme_len     equ ($ - str_readme_content - 1)
 
 str_dot            db ".", 0
 str_dotdot         db "..", 0
+

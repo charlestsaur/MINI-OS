@@ -27,23 +27,30 @@ This document only describes code/file responsibilities.
   - command parser
   - command dispatch
   - user-facing error message mapping
-  - handlers (`cat`, `edit`, and command wrappers)
+  - handlers (`cat`, `edit`, `run`, and command wrappers)
+  - `shell_run`: multi-sector executable loader and runner
 
-## 4. Driver Layer
+## 4. Interrupts & System Calls
+
+- `OS_src/kernel/idt.asm`
+  - IDT table setup (`lidt`)
+  - `int 0x80` system call gate handler (`sys_exit`, `sys_write`)
+
+## 5. Driver Layer
 
 - `OS_src/kernel/drivers.asm`
   - ATA PIO read/write helpers (LBA28)
   - keyboard polling and scan-code translation
   - VGA text-mode output/cursor helpers
 
-## 5. Utility Layer
+## 6. Utility Layer
 
 - `OS_src/kernel/utils.asm`
   - memory clear/copy
   - string/name copy
   - case-insensitive compare helpers
 
-## 6. Filesystem Modules
+## 7. Filesystem Modules
 
 - `OS_src/kernel/fs/bootstrap.asm`: mount/format/bootstrap
 - `OS_src/kernel/fs/path.asm`: path resolve/split/validation/cwd path rebuild
@@ -54,9 +61,27 @@ This document only describes code/file responsibilities.
 - `OS_src/kernel/fs/alloc.asm`: inode/data allocation, inode read/write, bitmap ops
 - `OS_src/kernel/fs.asm`: filesystem include aggregator
 
-## 7. Build Definition
+## 8. Host Tools & User Applications
+
+- `tools/inject_transport.c`
+  - host C program for parsing MINI-OS disk images and injecting compiled binaries into `/external/`
+
+- `tools/elf2bin.c`
+  - host C 32-bit ELF linker and flat binary generator
+
+- `transport/lib/`
+  - `crt0.asm`: C runtime startup file (`_start`)
+  - `minilibc.h` / `minilibc.c`: C90 standard library wrappers (`printf`, `puts`, `write`, `exit`)
+
+- `transport/apps/`
+  - C90 user application sources (e.g. `hello.c`, `calc.c`)
+
+- `transport/build/`
+  - compiled flat binary outputs (e.g. `hello.bin`, `calc.bin`)
+
+## 9. Build Definition
 
 - `Makefile`
   - source path selection
-  - build rules for boot/kernel/image
+  - build rules for boot/kernel/image/tool/apps
   - run and clean targets

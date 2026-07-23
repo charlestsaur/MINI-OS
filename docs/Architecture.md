@@ -10,22 +10,29 @@
 - Initializes temporary execution environment (segments/stack/GDT).
 - Performs protected-mode transition.
 
-### Layer 1: Kernel Core and Shell
+### Layer 1: Kernel Core, IDT Syscalls, and Shell
 
 - File: `OS_src/kernel/main.asm`
-- Initializes console.
+- Initializes console and IDT interrupt table.
 - Ensures file system availability.
 - Enters perpetual REPL shell loop.
 
+- File: `OS_src/kernel/idt.asm`
+- Manages 256-entry IDT table at physical memory `0x00026000`.
+- Implements `int 0x80` system call handler:
+  - `EAX=1` (`sys_exit`): restores kernel Shell ESP from `[saved_kernel_esp]` and returns cleanly to Shell.
+  - `EAX=4` (`sys_write`): outputs text buffer to VGA console.
+
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
-- Dispatches operations to filesystem wrappers.
+- Dispatches operations to filesystem wrappers and executable loader (`run`).
+- Implements `shell_run`: loads multi-sector binary to `0x00040000`, switches stack to `0x0008F000`, and executes.
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
 
 - File: `OS_src/kernel/drivers.asm`
-- ATA PIO sector read/write (`LBA28`, one sector).
+- ATA PIO sector read/write (`LBA28`, sector read/write).
 - Keyboard polling and scan-code translation.
 - VGA text-mode rendering and cursor control.
 
@@ -36,6 +43,9 @@
 
 - File: `OS_src/kernel/utils.asm`
 - Shared low-level primitives: zero/copy/string/compare helpers.
+
+- File: `tools/inject_transport.c`
+- Host-side C tool that parses MINI-OS filesystem structures and injects host `transport/` files into `/external/` during `make`.
 
 ## Data Model
 
@@ -65,6 +75,17 @@ Directory entries are stored in data blocks referenced by directory inodes.
 3. Validate root inode.
 4. If invalid, format disk and bootstrap root + README.
 
+### Executable Run (`run <file>`)
+
+1. Resolve file Inode via path lookup.
+2. Verify target is a regular file (`type == 1`).
+3. Read `start_block` and `blocks_cnt`.
+4. Loop-read sectors into physical memory `0x00040000 + i * 512`.
+5. Save Shell stack pointer in `[saved_kernel_esp]`.
+6. Set stack pointer `esp = 0x0008F000`.
+7. `call 0x00040000`.
+8. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores `[saved_kernel_esp]` and jumps to `return_to_shell`.
+
 ### Path Resolution
 
 1. Choose root/cwd start based on absolute vs relative path.
@@ -81,16 +102,22 @@ Directory entries are stored in data blocks referenced by directory inodes.
 5. Clear source entry.
 6. Update inode parent + name.
 
-## Memory Buffers (Static)
+## Memory Map & Static Buffers
 
-The kernel uses fixed buffers in low memory for metadata and transient command/text work:
+The kernel uses explicit physical memory regions for buffers and execution:
 
-- `BUF_SUPERBLOCK`
-- `BUF_BITMAP`
-- `BUF_SECTOR`
-- `BUF_TEXT`
-- `BUF_INODE`
-- `BUF_CMD`
+- `0x00007C00`: Bootloader MBR
+- `0x00008000`: Kernel code & data (`kernel.bin`)
+- `0x00020000`: `BUF_SUPERBLOCK`
+- `0x00021000`: `BUF_BITMAP`
+- `0x00022000`: `BUF_SECTOR`
+- `0x00023000`: `BUF_TEXT`
+- `0x00024000`: `BUF_INODE`
+- `0x00025000`: `BUF_CMD`
+- `0x00026000`: `IDT_BASE` (2048-byte IDT table)
+- `0x00040000`: User Program Base Address (`run` load target)
+- `0x0008F000`: User Application Stack Pointer (grows downwards)
+- `0x00090000`: Kernel Stack Pointer (grows downwards)
 
 This avoids dynamic memory management and keeps flows explicit.
 

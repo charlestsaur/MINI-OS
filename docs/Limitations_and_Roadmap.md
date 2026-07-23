@@ -4,8 +4,9 @@ This file documents current limitations only.
 
 ## Platform And Runtime
 
-- Single-task execution model.
-- No process isolation; everything runs with kernel privilege.
+- Single-task execution model (executes raw flat binaries loaded at `0x00040000`).
+- System calls via `int 0x80` (`sys_exit`, `sys_write`) implemented via IDT interrupt gates.
+- No Ring 3 hardware process isolation; user applications and kernel share Ring 0 flat protected mode.
 - No virtual memory or paging.
 - No interrupt-driven scheduling.
 

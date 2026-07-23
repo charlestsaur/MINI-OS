@@ -5,9 +5,11 @@
 
 Thanks to Gemini, Gork, GPT, and Mistral for their support.
 
-The documentation and some comments were written by GPT. A small part of the code was developed in collaboration with GPT.
+The documentation and some comments were written by Gemini and GPT. A small part of the code was developed in collaboration with Gemini and GPT.
 
-Currently, MINI_OS is a very small x86 32-bit pure assembly operating system.
+Currently, MINI-OS is a very small x86 32-bit pure assembly operating system.
+
+MINI-OS supports running C90-standard C programs that do not use dynamic memory allocation (malloc/free) or floating-point operations (float/double).
 
 ![](/docs/image/OS-demo.png)
 
@@ -22,19 +24,26 @@ Currently, MINI_OS is a very small x86 32-bit pure assembly operating system.
 - VGA text console and polling keyboard input
 - ATA PIO disk I/O (`LBA28`, sector read/write)
 - Custom filesystem with persistent directory tree
+- IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_write`)
+- Executable loader (`run <file>`) for multi-sector flat binaries at `0x00040000`
+- C90 application runtime (`CRT0` + `MiniLibC`)
+- Host-side disk transport tool (`tools/inject_transport.c`) for inject `/external/` files
 - Built-in shell commands:
-  `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `format`
+  `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `run <file>`, `format`
 
 ## Project Layout
 
 - `OS_src/boot/`: bootloader sources
-- `OS_src/kernel/`: kernel, shell, drivers, filesystem, and utilities
+- `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
+- `tools/`: host build tools (`inject_transport.c`)
+- `transport/`: host files injected into `/external/` on disk image (includes C90 `hello.c`, `minilibc`, `crt0.asm`)
 - `docs/`: project documentation
 - `build/`: generated binaries and disk image
 
 ## Requirements
 
 - `nasm`
+- `cc` / `clang` / `gcc` (host C compiler for `inject_transport` build)
 - `qemu-system-i386`
 - standard shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`)
 
@@ -50,6 +59,7 @@ Build artifacts:
 
 - `build/boot.bin`
 - `build/kernel.bin`
+- `build/inject_transport`
 - `build/mini_os.img`
 
 ## Quick Usage in Shell
@@ -58,12 +68,18 @@ Typical flow after boot:
 
 ```text
 mkdir docs
-cd docs
+cd /docs
 touch note.txt
 edit note.txt
 cat note.txt
 mv note.txt note2.txt
 ls
+
+cd /transport/build
+ls
+run hello.bin
+run calc.bin
+
 ```
 
 ## Filesystem Snapshot
@@ -85,6 +101,7 @@ Sector layout in current implementation:
 - Code structure: `docs/Code_Structure.md`
 - Build and run: `docs/Build_and_Run.md`
 - Shell and usage: `docs/Shell_and_Usage.md`
+- C90 development guide: `docs/C90_Development_Guide.md`
 - Filesystem (current implementation): `docs/Filesystem_Current.md`
 - Filesystem design draft: `docs/DIY-FS.md`
 - Real hardware boot guide: `docs/Real_Hardware_Guide.md`

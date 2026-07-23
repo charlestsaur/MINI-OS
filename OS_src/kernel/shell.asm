@@ -13,67 +13,74 @@ shell_dispatch:
     mov edi, cmd_help
     call str_eq_ci
     cmp al, 1
-    je .help
+    je near .help
 
     mov esi, [tok_cmd]
     mov edi, cmd_ls
     call str_eq_ci
     cmp al, 1
-    je .ls
+    je near .ls
 
     mov esi, [tok_cmd]
     mov edi, cmd_pwd
     call str_eq_ci
     cmp al, 1
-    je .pwd
+    je near .pwd
 
     mov esi, [tok_cmd]
     mov edi, cmd_cd
     call str_eq_ci
     cmp al, 1
-    je .cd
+    je near .cd
 
     mov esi, [tok_cmd]
     mov edi, cmd_mkdir
     call str_eq_ci
     cmp al, 1
-    je .mkdir
+    je near .mkdir
 
     mov esi, [tok_cmd]
     mov edi, cmd_touch
     call str_eq_ci
     cmp al, 1
-    je .touch
+    je near .touch
 
     mov esi, [tok_cmd]
     mov edi, cmd_cat
     call str_eq_ci
     cmp al, 1
-    je .cat
+    je near .cat
 
     mov esi, [tok_cmd]
     mov edi, cmd_edit
     call str_eq_ci
     cmp al, 1
-    je .edit
+    je near .edit
 
     mov esi, [tok_cmd]
     mov edi, cmd_rm
     call str_eq_ci
     cmp al, 1
-    je .rm
+    je near .rm
 
     mov esi, [tok_cmd]
     mov edi, cmd_mv
     call str_eq_ci
     cmp al, 1
-    je .mv
+    je near .mv
 
     mov esi, [tok_cmd]
     mov edi, cmd_format
     call str_eq_ci
     cmp al, 1
-    je .format
+    je near .format
+
+    mov esi, [tok_cmd]
+    mov edi, cmd_run
+    call str_eq_ci
+    cmp al, 1
+    je near .run
+
 
     mov esi, msg_unknown
     call vga_print
@@ -243,6 +250,17 @@ shell_dispatch:
 .format:
     call fs_format
     call fs_set_cwd_root
+    jmp .done
+
+.run:
+    mov esi, [tok_arg1]
+    test esi, esi
+    jz .run_usage
+    call shell_run
+    jmp .done
+.run_usage:
+    mov esi, msg_usage_run
+    call vga_print
     jmp .done
 
 .exists:
@@ -500,3 +518,88 @@ shell_edit:
     call vga_print
     pop esi
     ret
+
+; ----------------------------
+; Executable Runner
+; ----------------------------
+; IN: ESI = file path
+shell_run:
+    push esi
+    call fs_lookup_path
+    cmp eax, -1
+    je shell_run_not_found
+
+    mov [tmp_inode_idx], eax
+    mov edi, BUF_INODE
+    call fs_read_inode
+
+    cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
+    jne shell_run_not_file
+
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    cmp ecx, 0
+    je shell_run_empty
+
+    mov [tmp_data_lba], eax       ; Start LBA
+    mov [tmp_child_inode], ecx    ; Sector count
+    xor ebx, ebx                  ; Sector index i = 0
+
+shell_run_load_loop:
+    cmp ebx, [tmp_child_inode]
+    jge shell_run_load_done
+
+    mov eax, [tmp_data_lba]
+    add eax, ebx
+
+    mov edi, ebx
+    shl edi, 9
+    add edi, 0x00040000          ; Dest = 0x00040000 + i * 512
+
+    push ebx
+    call ata_read_sector_lba28
+    pop ebx
+
+    inc ebx
+    jmp shell_run_load_loop
+
+shell_run_load_done:
+    mov esi, msg_app_start
+    call vga_print
+
+    ; Save kernel stack
+    mov [saved_kernel_esp], esp
+
+    ; Switch to user stack
+    mov esp, 0x0008F000
+
+    ; Jump to app at 0x00040000
+    mov eax, 0x00040000
+    call eax
+
+return_to_shell:
+    mov esp, [saved_kernel_esp]
+    mov esi, msg_app_finished
+    call vga_print
+    pop esi
+    ret
+
+shell_run_empty:
+    mov esi, msg_empty
+    call vga_print
+    pop esi
+    ret
+
+shell_run_not_file:
+    mov esi, msg_not_file
+    call vga_print
+    pop esi
+    ret
+
+shell_run_not_found:
+    mov esi, msg_not_found
+    call vga_print
+    pop esi
+    ret
+
+

@@ -30,6 +30,7 @@ Supported commands:
 - `edit <file>`
 - `rm <path>`
 - `mv <old> <new>`
+- `run <file>`
 - `format`
 
 ## 3. Command Behavior
@@ -98,21 +99,44 @@ Renames or moves entry.
 - destination must not already exist
 - moving a directory into itself/subtree is rejected
 
+### `run <file>`
+
+Loads and executes a raw binary application from disk.
+
+- resolves target file Inode and verifies regular file type (`INODE_TYPE == 1`)
+- reads all occupied sectors contiguously into physical memory `0x00040000`
+- saves kernel Shell stack pointer in `[saved_kernel_esp]`
+- sets user stack pointer `esp = 0x0008F000`
+- jumps to `0x00040000`
+- user application executes and invokes system calls via `int 0x80` (`sys_exit`, `sys_write`)
+- upon `sys_exit` (`int 0x80`, `eax=1`), kernel restores `[saved_kernel_esp]` and cleanly returns to Shell prompt
+
 ### `format`
 
 Reformats filesystem and resets cwd to root.
 
 ## 4. Typical Usage Flow
 
-Example session:
+Example session 1 (Executing C90 application):
 
-1. `mkdir docs`
-2. `cd docs`
-3. `touch note.txt`
-4. `edit note.txt`
-5. `cat note.txt`
-6. `mv note.txt note2.txt`
-7. `ls`
+```text
+cd /transport/build
+ls
+run hello.bin
+
+```
+
+Example session 2 (File manipulation):
+
+```text
+mkdir docs
+cd docs
+touch note.txt
+edit note.txt
+cat note.txt
+mv note.txt note2.txt
+ls
+```
 
 ## 5. Input Notes
 
