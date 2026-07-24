@@ -41,6 +41,9 @@ Applications interact with the operating system through `minilibc.h`. The curren
 | `int printf(const char *fmt, ...);` | Formatted output supporting `%s`, `%d`, `%x`, `%c`, `%%` |
 | `int puts(const char *str);` | Outputs a string followed by a newline |
 | `int write(int fd, const char *buf, unsigned int count);` | Invokes `sys_write` (FD 1 = stdout) |
+| `int read(int fd, char *buf, unsigned int count);` | Invokes `sys_read` (FD 0 = stdin) with keyboard echo and backspace |
+| `int getchar(void);` | Reads a single character from keyboard |
+| `char *gets(char *buf);` | Reads a line of user input from keyboard into buffer |
 | `void exit(int status);` | Invokes `sys_exit` to terminate the application and return to Shell |
 
 ## 3. Directory Layout for User Applications

@@ -27,6 +27,37 @@ int write(int fd, const char *buf, unsigned int count) {
     return ret;
 }
 
+int read(int fd, char *buf, unsigned int count) {
+    int ret;
+    __asm__ __volatile__ (
+        "movl %1, %%eax\n\t"
+        "movl %2, %%ebx\n\t"
+        "movl %3, %%ecx\n\t"
+        "movl %4, %%edx\n\t"
+        "int $0x80\n\t"
+        : "=a"(ret)
+        : "i"(3), "g"(fd), "g"(buf), "g"(count)
+        : "ebx", "ecx", "edx"
+    );
+    return ret;
+}
+
+int getchar(void) {
+    char c = 0;
+    if (read(0, &c, 1) > 0) {
+        return (unsigned char)c;
+    }
+    return -1;
+}
+
+char *gets(char *buf) {
+    if (read(0, buf, 128) >= 0) {
+        return buf;
+    }
+    return 0;
+}
+
+
 static unsigned int strlen(const char *s) {
     unsigned int len = 0;
     while (s[len]) len++;

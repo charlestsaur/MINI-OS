@@ -23,7 +23,8 @@ MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
 APP_SRCS := $(shell find $(APPS_DIR) -name '*.c' 2>/dev/null)
 APP_BINS := $(patsubst $(APPS_DIR)/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS))
 
-NASM := nasm
+NASM := nasm -w-label-redef-late
+
 CC := cc
 CLANG := clang
 LLD := ld.lld

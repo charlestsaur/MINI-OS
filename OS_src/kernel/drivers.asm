@@ -258,7 +258,9 @@ kbd_read_text:
     pop ebx
     ret
 
-; OUT: AL = ASCII char, 0 if unsupported
+kbd_shift_state db 0
+
+; OUT: AL = ASCII char, 0 if unsupported/key release
 kbd_read_char_blocking:
 .wait_key:
     mov dx, KBD_STATUS_PORT
@@ -269,26 +271,238 @@ kbd_read_char_blocking:
     mov dx, KBD_DATA_PORT
     in al, dx
 
-    cmp al, 0x80
-    jae .unsupported
+    ; Check Shift make/break codes
+    cmp al, 0x2A        ; Left Shift press
+    je .shift_on
+    cmp al, 0x36        ; Right Shift press
+    je .shift_on
+    cmp al, 0xAA        ; Left Shift release
+    je .shift_off
+    cmp al, 0xB6        ; Right Shift release
+    je .shift_off
 
-    cmp al, 0x1C
+    cmp al, 0x80
+    jae .unsupported    ; Ignore other key releases (>= 0x80)
+
+    ; Special keys
+    cmp al, 0x1C        ; Enter
     je .enter
-    cmp al, 0x01
+    cmp al, 0x01        ; Esc
     je .esc
-    cmp al, 0x0E
+    cmp al, 0x0E        ; Backspace
     je .backspace
-    cmp al, 0x39
+    cmp al, 0x53        ; Delete
+    je .backspace
+    cmp al, 0x39        ; Space
     je .space
 
+    ; Number & Symbol row (0x02 to 0x0D)
     cmp al, 0x02
-    jb .letters
-    cmp al, 0x0A
-    jbe .num_1_9
-    cmp al, 0x0B
-    je .num_0
+    jb .check_other_symbols
+    cmp al, 0x0D
+    jbe .num_symbol_row
 
-.letters:
+.check_other_symbols:
+    cmp al, 0x29        ; ` / ~
+    je .tilde_key
+    cmp al, 0x1A        ; [ / {
+    je .lbrace_key
+    cmp al, 0x1B        ; ] / }
+    je .rbrace_key
+    cmp al, 0x2B        ; \ / |
+    je .backslash_key
+    cmp al, 0x27        ; ; / :
+    je .colon_key
+    cmp al, 0x28        ; ' / "
+    je .quote_key
+    cmp al, 0x33        ; , / <
+    je .comma_key
+    cmp al, 0x34        ; . / >
+    je .dot_key
+    cmp al, 0x35        ; / / ?
+    je .slash_key
+
+    call kbd_map_letter
+    test al, al
+    jnz .done_char
+
+.unsupported:
+    xor al, al
+    ret
+
+.shift_on:
+    mov byte [kbd_shift_state], 1
+    xor al, al
+    ret
+
+.shift_off:
+    mov byte [kbd_shift_state], 0
+    xor al, al
+    ret
+
+.enter:
+    mov al, 13
+    ret
+
+.esc:
+    mov al, 27
+    ret
+
+.backspace:
+    mov al, 8
+    ret
+
+.space:
+    mov al, ' '
+    ret
+
+.num_symbol_row:
+    cmp byte [kbd_shift_state], 1
+    je .num_symbol_shifted
+    cmp al, 0x0B
+    jbe .num_1_0
+    cmp al, 0x0C
+    je .minus_plain
+    mov al, '='
+    ret
+.num_1_0:
+    cmp al, 0x0B
+    je .zero_plain
+    add al, '1' - 0x02
+    ret
+.zero_plain:
+    mov al, '0'
+    ret
+.minus_plain:
+    mov al, '-'
+    ret
+
+.num_symbol_shifted:
+    cmp al, 0x02
+    je .shift_excl
+    cmp al, 0x03
+    je .shift_at
+    cmp al, 0x04
+    je .shift_hash
+    cmp al, 0x05
+    je .shift_dollar
+    cmp al, 0x06
+    je .shift_percent
+    cmp al, 0x07
+    je .shift_caret
+    cmp al, 0x08
+    je .shift_amp
+    cmp al, 0x09
+    je .shift_star
+    cmp al, 0x0A
+    je .shift_lparen
+    cmp al, 0x0B
+    je .shift_rparen
+    cmp al, 0x0C
+    je .shift_under
+    mov al, '+'
+    ret
+
+.shift_excl:    mov al, '!'
+                ret
+.shift_at:      mov al, '@'
+                ret
+.shift_hash:    mov al, '#'
+                ret
+.shift_dollar:  mov al, '$'
+                ret
+.shift_percent: mov al, '%'
+                ret
+.shift_caret:   mov al, '^'
+                ret
+.shift_amp:     mov al, '&'
+                ret
+.shift_star:    mov al, '*'
+                ret
+.shift_lparen:  mov al, '('
+                ret
+.shift_rparen:  mov al, ')'
+                ret
+.shift_under:   mov al, '_'
+                ret
+
+.tilde_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_tilde
+    mov al, '`'
+    ret
+.ret_tilde:     mov al, '~'
+                ret
+
+.lbrace_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_lbrace
+    mov al, '['
+    ret
+.ret_lbrace:    mov al, '{'
+                ret
+
+.rbrace_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_rbrace
+    mov al, ']'
+    ret
+.ret_rbrace:    mov al, '}'
+                ret
+
+.backslash_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_pipe
+    mov al, '\'
+    ret
+.ret_pipe:      mov al, '|'
+                ret
+
+.colon_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_colon
+    mov al, ';'
+    ret
+.ret_colon:     mov al, ':'
+                ret
+
+.quote_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_dquote
+    mov al, "'"
+    ret
+.ret_dquote:    mov al, '"'
+                ret
+
+.comma_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_less
+    mov al, ','
+    ret
+.ret_less:      mov al, '<'
+                ret
+
+.dot_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_greater
+    mov al, '.'
+    ret
+.ret_greater:   mov al, '>'
+                ret
+
+.slash_key:
+    cmp byte [kbd_shift_state], 1
+    je .ret_question
+    mov al, '/'
+    ret
+.ret_question:  mov al, '?'
+                ret
+
+.done_char:
+    ret
+
+kbd_map_letter:
+    mov ah, [kbd_shift_state]
     cmp al, 0x1E
     je .a
     cmp al, 0x30
@@ -341,111 +555,67 @@ kbd_read_char_blocking:
     je .y
     cmp al, 0x2C
     je .z
-
-    cmp al, 0x34
-    je .dot
-    cmp al, 0x35
-    je .slash
-    cmp al, 0x0C
-    je .minus
-    cmp al, 0x0D
-    je .equal
-
-.unsupported:
     xor al, al
     ret
 
-.num_1_9:
-    add al, '1' - 0x02
-    ret
-
-.num_0:
-    mov al, '0'
-    ret
-
-.enter:
-    mov al, 13
-    ret
-
-.esc:
-    mov al, 27
-    ret
-
-.backspace:
-    mov al, 8
-    ret
-
-.space:
-    mov al, ' '
-    ret
-
-.dot:
-    mov al, '.'
-    ret
-
-.slash:
-    mov al, '/'
-    ret
-
-.minus:
-    mov al, '-'
-    ret
-
-.equal:
-    mov al, '='
-    ret
-
 .a: mov al, 'a'
-    ret
+    jmp .apply_shift
 .b: mov al, 'b'
-    ret
+    jmp .apply_shift
 .c: mov al, 'c'
-    ret
+    jmp .apply_shift
 .d: mov al, 'd'
-    ret
+    jmp .apply_shift
 .e: mov al, 'e'
-    ret
+    jmp .apply_shift
 .f: mov al, 'f'
-    ret
+    jmp .apply_shift
 .g: mov al, 'g'
-    ret
+    jmp .apply_shift
 .h: mov al, 'h'
-    ret
+    jmp .apply_shift
 .i: mov al, 'i'
-    ret
+    jmp .apply_shift
 .j: mov al, 'j'
-    ret
+    jmp .apply_shift
 .k: mov al, 'k'
-    ret
+    jmp .apply_shift
 .l: mov al, 'l'
-    ret
+    jmp .apply_shift
 .m: mov al, 'm'
-    ret
+    jmp .apply_shift
 .n: mov al, 'n'
-    ret
+    jmp .apply_shift
 .o: mov al, 'o'
-    ret
+    jmp .apply_shift
 .p: mov al, 'p'
-    ret
+    jmp .apply_shift
 .q: mov al, 'q'
-    ret
+    jmp .apply_shift
 .r: mov al, 'r'
-    ret
+    jmp .apply_shift
 .s: mov al, 's'
-    ret
+    jmp .apply_shift
 .t: mov al, 't'
-    ret
+    jmp .apply_shift
 .u: mov al, 'u'
-    ret
+    jmp .apply_shift
 .v: mov al, 'v'
-    ret
+    jmp .apply_shift
 .w: mov al, 'w'
-    ret
+    jmp .apply_shift
 .x: mov al, 'x'
-    ret
+    jmp .apply_shift
 .y: mov al, 'y'
-    ret
+    jmp .apply_shift
 .z: mov al, 'z'
+    jmp .apply_shift
+
+.apply_shift:
+    test ah, ah
+    jz .no_shift
+    sub al, 32
+.no_shift:
     ret
 
 ; ----------------------------
@@ -478,7 +648,9 @@ vga_putc:
     push edi
 
     cmp al, 10
-    je .newline
+    je near .newline
+    cmp al, 8
+    je near .backspace
 
     mov ebx, [cursor_row]
     imul ebx, VGA_WIDTH
@@ -493,22 +665,26 @@ vga_putc:
     mov edx, [cursor_col]
     inc edx
     cmp edx, VGA_WIDTH
-    jl .store_col
+    jl near .store_col
     mov edx, 0
     mov ebx, [cursor_row]
     inc ebx
     cmp ebx, VGA_HEIGHT
-    jl .store_row
+    jl near .store_row
     call vga_scroll_up
     mov ebx, VGA_HEIGHT - 1
 .store_row:
     mov [cursor_row], ebx
 .store_col:
     mov [cursor_col], edx
-    jmp .done
+    jmp near .done
 
 .newline:
     call vga_newline
+    jmp near .done
+
+.backspace:
+    call vga_backspace
 
 .done:
     call vga_sync_cursor
@@ -521,6 +697,7 @@ vga_putc:
 vga_backspace:
     push eax
     push ebx
+    push edi
 
     mov ebx, [cursor_col]
     cmp ebx, 0
@@ -528,20 +705,22 @@ vga_backspace:
 
     dec ebx
     mov [cursor_col], ebx
-    mov al, ' '
-    call vga_putc
 
-    mov ebx, [cursor_col]
-    cmp ebx, 0
-    je .done
-    dec ebx
-    mov [cursor_col], ebx
+    mov eax, [cursor_row]
+    imul eax, VGA_WIDTH
+    add eax, ebx
+    shl eax, 1
+    mov edi, VGA_BUFFER
+    add edi, eax
+    mov word [edi], 0x0720
 
 .done:
     call vga_sync_cursor
+    pop edi
     pop ebx
     pop eax
     ret
+
 
 vga_newline:
     push eax

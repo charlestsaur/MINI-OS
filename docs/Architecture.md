@@ -21,6 +21,7 @@
 - Manages 256-entry IDT table at physical memory `0x00026000`.
 - Implements `int 0x80` system call handler:
   - `EAX=1` (`sys_exit`): restores kernel Shell ESP from `[saved_kernel_esp]` and returns cleanly to Shell.
+  - `EAX=3` (`sys_read`): reads keyboard input with character echo, backspace handling, and newline detection into buffer.
   - `EAX=4` (`sys_write`): outputs text buffer to VGA console.
 
 - File: `OS_src/kernel/shell.asm`
