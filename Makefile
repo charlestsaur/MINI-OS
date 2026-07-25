@@ -12,6 +12,7 @@ ELF2BIN_TOOL := $(BUILD_DIR)/elf2bin
 
 LIB_DIR := transport/lib
 APPS_DIR := transport/apps
+LIB_TEST_DIR := transport/lib_test
 APP_BUILD_DIR := transport/build
 
 CRT0_SRC := $(LIB_DIR)/crt0.asm
@@ -20,8 +21,8 @@ MINILIBC_SRC := $(LIB_DIR)/minilibc.c
 CRT0_OBJ := $(BUILD_DIR)/crt0.o
 MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
 
-APP_SRCS := $(shell find $(APPS_DIR) -name '*.c' 2>/dev/null)
-APP_BINS := $(patsubst $(APPS_DIR)/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS))
+APP_SRCS := $(shell find $(APPS_DIR) $(LIB_TEST_DIR) -name '*.c' 2>/dev/null)
+APP_BINS := $(patsubst transport/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS))
 
 NASM := nasm -w-label-redef-late
 
@@ -50,19 +51,19 @@ $(CRT0_OBJ): $(CRT0_SRC) | $(BUILD_DIR)
 	$(NASM) -f elf32 $(CRT0_SRC) -o $(CRT0_OBJ)
 
 $(MINILIBC_OBJ): $(MINILIBC_SRC) | $(BUILD_DIR)
-	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=c90 -I$(LIB_DIR) -c $(MINILIBC_SRC) -o $(MINILIBC_OBJ)
+	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=gnu11 -I$(LIB_DIR) -c $(MINILIBC_SRC) -o $(MINILIBC_OBJ)
 
-# Generic rule to compile any user C app in transport/apps/
-$(APP_BUILD_DIR)/%.bin: $(APPS_DIR)/%.c $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) | $(BUILD_DIR) $(APP_BUILD_DIR)
-	@echo "Compiling user app '$<'..."
+# Generic rule to compile any C app or library test under transport/
+$(APP_BUILD_DIR)/%.bin: transport/%.c $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) | $(BUILD_DIR) $(APP_BUILD_DIR)
+	@echo "Compiling C binary '$<'..."
 	@mkdir -p $(dir $@)
-	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=c90 -I$(LIB_DIR) -c $< -o $(BUILD_DIR)/$*.o
+	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=c90 -I$(LIB_DIR) -c $< -o $(BUILD_DIR)/$(notdir $*).o
 	@if command -v $(LLD) >/dev/null 2>&1; then \
 		echo "Linking '$@' using Solution A (ld.lld)..."; \
-		$(LLD) -m elf_i386 --image-base 0x40000 -Ttext 0x40000 --oformat binary $(CRT0_OBJ) $(BUILD_DIR)/$*.o $(MINILIBC_OBJ) -o $@; \
+		$(LLD) -m elf_i386 --image-base 0x40000 -Ttext 0x40000 --oformat binary $(CRT0_OBJ) $(BUILD_DIR)/$(notdir $*).o $(MINILIBC_OBJ) -o $@; \
 	else \
 		echo "Linking '$@' using Solution B (elf2bin host tool)..."; \
-		$(ELF2BIN_TOOL) $@ 0x40000 $(CRT0_OBJ) $(BUILD_DIR)/$*.o $(MINILIBC_OBJ); \
+		$(ELF2BIN_TOOL) $@ 0x40000 $(CRT0_OBJ) $(BUILD_DIR)/$(notdir $*).o $(MINILIBC_OBJ); \
 	fi
 
 apps: $(APP_BINS)
@@ -93,8 +94,6 @@ $(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(APP_BINS) | $(BUILD_DIR)
 	dd if=$(BOOT_BIN) of=$(OS_IMG) bs=512 seek=0 conv=notrunc
 	dd if=$(KERNEL_BIN) of=$(OS_IMG) bs=512 seek=1 conv=notrunc
 	$(INJECT_TOOL) $(OS_IMG) transport
-
-
 
 run: $(OS_IMG)
 	$(QEMU) -drive format=raw,file=$(OS_IMG)

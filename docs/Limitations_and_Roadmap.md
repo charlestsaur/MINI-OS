@@ -5,7 +5,9 @@ This file documents current limitations only.
 ## Platform And Runtime
 
 - Single-task execution model (executes raw flat binaries loaded at `0x00040000`).
-- System calls via `int 0x80` (`sys_exit`, `sys_write`) implemented via IDT interrupt gates.
+- System calls via `int 0x80` (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`) implemented via IDT interrupt gates.
+- Dynamic heap memory allocation (`malloc`, `free`, `realloc`, `calloc`) managed by `sys_brk` (heap space `0x00050000` to `0x00080000`).
+- Full ANSI C90 standard library support (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`).
 - No Ring 3 hardware process isolation; user applications and kernel share Ring 0 flat protected mode.
 - No virtual memory or paging.
 - No interrupt-driven scheduling.

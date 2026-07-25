@@ -81,6 +81,11 @@ shell_dispatch:
     cmp al, 1
     je near .run
 
+    mov esi, [tok_cmd]
+    mov edi, cmd_vedit
+    call str_eq_ci
+    cmp al, 1
+    je near .vedit_cmd
 
     mov esi, msg_unknown
     call vga_print
@@ -154,7 +159,7 @@ shell_dispatch:
     jz .touch_usage
     call fs_create_file_path
     cmp eax, 0
-    je .touch_ok
+    jge .touch_ok
     cmp eax, -1
     je .exists
     cmp eax, -2
@@ -256,11 +261,18 @@ shell_dispatch:
     mov esi, [tok_arg1]
     test esi, esi
     jz .run_usage
+    mov edi, [tok_arg2]
     call shell_run
     jmp .done
 .run_usage:
     mov esi, msg_usage_run
     call vga_print
+    jmp .done
+
+.vedit_cmd:
+    mov esi, str_vedit_bin_path
+    mov edi, [tok_arg1]
+    call shell_run
     jmp .done
 
 .exists:
@@ -430,7 +442,7 @@ shell_edit:
     push esi
     call fs_create_file_path
     cmp eax, 0
-    jne .create_fail
+    jl .create_fail
 
     pop esi
     push esi
@@ -522,24 +534,26 @@ shell_edit:
 ; ----------------------------
 ; Executable Runner
 ; ----------------------------
-; IN: ESI = file path
+; IN: ESI = file path, EDI = optional arg2
 shell_run:
     push esi
+    push edi
+
     call fs_lookup_path
     cmp eax, -1
-    je shell_run_not_found
+    je near shell_run_not_found
 
     mov [tmp_inode_idx], eax
     mov edi, BUF_INODE
     call fs_read_inode
 
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
-    jne shell_run_not_file
+    jne near shell_run_not_file
 
     mov eax, [BUF_INODE + INODE_START_OFF]
     mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
     cmp ecx, 0
-    je shell_run_empty
+    je near shell_run_empty
 
     mov [tmp_data_lba], eax       ; Start LBA
     mov [tmp_child_inode], ecx    ; Sector count
@@ -547,7 +561,7 @@ shell_run:
 
 shell_run_load_loop:
     cmp ebx, [tmp_child_inode]
-    jge shell_run_load_done
+    jge near shell_run_load_done
 
     mov eax, [tmp_data_lba]
     add eax, ebx
@@ -561,17 +575,59 @@ shell_run_load_loop:
     pop ebx
 
     inc ebx
-    jmp shell_run_load_loop
+    jmp near shell_run_load_loop
 
 shell_run_load_done:
+    pop edi                       ; tok_arg2
+    pop esi                       ; tok_arg1
+
+    ; Copy argv[0] string ("vedit.bin") to 0x0008E000
+    push esi
+    push edi
+    mov edi, 0x0008E000
+    call copy_str_until_zero
+    pop edi
+    pop esi
+
+    ; Check tok_arg2
+    test edi, edi
+    jz near .shell_run_argc1
+
+    ; Copy argv[1] string ("001.txt") to 0x0008E050
+    push esi
+    push edi
+    mov esi, edi
+    mov edi, 0x0008E050
+    call copy_str_until_zero
+    pop edi
+    pop esi
+
+    ; Build argv array at 0x0008E100
+    mov dword [0x0008E100], 0x0008E000
+    mov dword [0x0008E104], 0x0008E050
+    mov dword [0x0008E108], 0
+    mov ecx, 2                    ; argc = 2
+    jmp near .shell_run_setup_stack
+
+.shell_run_argc1:
+    mov dword [0x0008E100], 0x0008E000
+    mov dword [0x0008E104], 0
+    mov ecx, 1                    ; argc = 1
+
+.shell_run_setup_stack:
     mov esi, msg_app_start
     call vga_print
 
     ; Save kernel stack
     mov [saved_kernel_esp], esp
 
-    ; Switch to user stack
+    ; Setup user stack at 0x0008F000
     mov esp, 0x0008F000
+
+    ; Push ABI args onto user stack: [esp+0]=ret, [esp+4]=argc, [esp+8]=argv
+    push dword 0x0008E100        ; argv pointer array
+    push ecx                     ; argc
+    push dword 0                 ; dummy return address
 
     ; Jump to app at 0x00040000
     mov eax, 0x00040000
@@ -581,7 +637,15 @@ return_to_shell:
     mov esp, [saved_kernel_esp]
     mov esi, msg_app_finished
     call vga_print
-    pop esi
+    ret
+
+copy_str_until_zero:
+    mov al, [esi]
+    mov [edi], al
+    inc esi
+    inc edi
+    test al, al
+    jnz copy_str_until_zero
     ret
 
 shell_run_empty:
@@ -601,5 +665,3 @@ shell_run_not_found:
     call vga_print
     pop esi
     ret
-
-

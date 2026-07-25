@@ -175,6 +175,9 @@ cmd_mv             db "mv", 0
 cmd_edit           db "edit", 0
 cmd_run            db "run", 0
 cmd_format         db "format", 0
+cmd_vedit          db "vedit", 0
+str_vedit_bin_path db "/transport/build/apps/vedit.bin", 0
+str_path_apps_prefix db "/transport/build/apps/", 0
 
 str_readme_name    db "README.TXT", 0
 str_readme_content db "Welcome to MINI_OS.", 10
@@ -184,4 +187,3 @@ str_readme_len     equ ($ - str_readme_content - 1)
 
 str_dot            db ".", 0
 str_dotdot         db "..", 0
-

@@ -17,4 +17,3 @@ int main(void) {
     puts("Interactive session completed cleanly!");
     return 0;
 }
-

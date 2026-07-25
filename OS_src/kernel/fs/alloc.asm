@@ -78,6 +78,23 @@ fs_alloc_data_block:
     call bitmap_set
     mov eax, FS_DATA_START_LBA
     add eax, ecx
+
+    push eax
+    push edi
+    push esi
+
+    mov edi, BUF_SECTOR
+    call zero_sector
+
+    pop esi
+    pop edi
+    pop eax
+
+    push esi
+    mov esi, BUF_SECTOR
+    call ata_write_sector_lba28
+    pop esi
+
     pop ecx
     pop ebx
     ret

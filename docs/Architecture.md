@@ -23,6 +23,7 @@
   - `EAX=1` (`sys_exit`): restores kernel Shell ESP from `[saved_kernel_esp]` and returns cleanly to Shell.
   - `EAX=3` (`sys_read`): reads keyboard input with character echo, backspace handling, and newline detection into buffer.
   - `EAX=4` (`sys_write`): outputs text buffer to VGA console.
+  - `EAX=12` (`sys_brk`): expands process heap break address between `0x00050000` and `0x00080000` for dynamic memory allocation (`malloc`/`free`).
 
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).

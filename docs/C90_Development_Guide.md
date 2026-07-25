@@ -29,39 +29,46 @@ When writing C code for MINI-OS, adhere strictly to C90 syntax:
    *(Do not declare `for (int i = 0; ...)` inside the loop header).*
 
 2. **Block Comments**: Use standard C comments (`/* comment */`).
-3. **No Dynamic Memory Allocation (`malloc`)**: Dynamically allocated heap memory (`malloc`/`free`) is not yet supported. Use static arrays or local stack variables.
+3. **Dynamic Memory Allocation (`malloc`/`free`)**: Supported! Applications can dynamically allocate and free heap memory from `0x00050000` to `0x00080000` via `sys_brk` (EAX=12).
 4. **No Floating-Point Operations**: The x87 FPU is not initialized in protected mode. Avoid `float` and `double` arithmetic.
 
 ### 2.2 Standard Library Support (`minilibc`)
 
-Applications interact with the operating system through `minilibc.h`. The current runtime provides the following API functions:
+Applications interact with MINI-OS through standard C headers (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`). The current runtime provides the following API functions:
 
-| Function Signature | Description |
-| :--- | :--- |
-| `int printf(const char *fmt, ...);` | Formatted output supporting `%s`, `%d`, `%x`, `%c`, `%%` |
-| `int puts(const char *str);` | Outputs a string followed by a newline |
-| `int write(int fd, const char *buf, unsigned int count);` | Invokes `sys_write` (FD 1 = stdout) |
-| `int read(int fd, char *buf, unsigned int count);` | Invokes `sys_read` (FD 0 = stdin) with keyboard echo and backspace |
-| `int getchar(void);` | Reads a single character from keyboard |
-| `char *gets(char *buf);` | Reads a line of user input from keyboard into buffer |
-| `void exit(int status);` | Invokes `sys_exit` to terminate the application and return to Shell |
+| Header | Key API Functions & Macros | Description |
+| :--- | :--- | :--- |
+| **`<stdlib.h>`** | `malloc`, `free`, `realloc`, `calloc`, `atoi`, `strtol`, `rand`, `srand`, `qsort`, `bsearch` | Dynamic heap allocation, string parsing, random generation, and sorting |
+| **`<string.h>`** | `strcpy`, `strncpy`, `strcat`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strtok`, `memset`, `memcpy`, `memmove`, `memcmp` | String manipulation and raw memory operations |
+| **`<ctype.h>`** | `isalpha`, `isdigit`, `isalnum`, `isspace`, `islower`, `isupper`, `isprint`, `isgraph`, `ispunct`, `isxdigit`, `toupper`, `tolower` | ASCII character classification and case conversion |
+| **`<stdio.h>`** | `printf`, `sprintf`, `snprintf`, `puts`, `getchar`, `putchar`, `gets`, `fgets`, `write`, `read` | Formatted console output, string formatting, and keyboard input |
+| **`<limits.h>`** | `INT_MAX`, `INT_MIN`, `CHAR_BIT`, `SHRT_MAX`, `LONG_MAX`, etc. | Data type limits and integer range constants |
+| **`<stddef.h>`** | `size_t`, `ptrdiff_t`, `offsetof`, `NULL` | Standard type definitions and offset macros |
+| **`<assert.h>`** | `assert(expression)` | Runtime assertion testing |
 
-## 3. Directory Layout for User Applications
+## 3. Directory Layout for User Applications & Tests
 
-User applications are decoupled from the MINI-OS C standard library runtime:
+User applications and C library tests are decoupled from the MINI-OS C standard library runtime:
 
 ```plaintext
 transport/
-├── lib/                     <-- MINI-OS C Runtime Library
+├── lib/                     <-- MINI-OS C Runtime Library & Standard Headers
 │   ├── crt0.asm             <-- Application Startup Entry (_start)
-│   ├── minilibc.h           <-- Standard Library Headers
-│   └── minilibc.c           <-- System Call & Utility Wrappers
+│   ├── minilibc.h / .c      <-- Syscall & C Standard Library Implementation
+│   ├── stdio.h / stdlib.h   <-- Standard Header Wrappers
+│   ├── string.h / ctype.h
+│   └── limits.h / stddef.h / assert.h
 ├── apps/                    <-- User C Applications
 │   ├── hello.c
-│   └── calc.c
+│   ├── calc.c
+│   ├── guess.c
+│   └── banner.c
+├── lib_test/                <-- Dedicated C Library Test Suites
+│   ├── test_string.c
+│   └── test_heap.c
 └── build/                   <-- Compiled Output Binaries
-    ├── hello.bin
-    └── calc.bin
+    ├── apps/                <-- User App Executables (hello.bin, calc.bin, etc.)
+    └── lib_test/            <-- Test Executables (test_string.bin, test_heap.bin)
 ```
 
 ### Writing a User Application (`transport/apps/hello.c`)
@@ -141,6 +148,8 @@ make run
    /transport/build > ls
    entries:
     - calc.bin (f)
+    - guess.bin (f)
+    - banner.bin (f)
     - hello.bin (f)
    ```
 
@@ -153,11 +162,19 @@ make run
 ### Expected Output in MINI-OS Console
 
 ```text
+transport/build > run calc.bin
 MINI_OS: launching app...
---- MINI-OS Calculator App ---
-a = 15, b = 27
-a + b = 42
-a * b = 405
+==========================================
+   MINI-OS Interactive C90 Calculator
+==========================================
+Format: <num1> <op> <num2> (e.g. 12 + 34, 100 / 5)
+Operators: +, -, *, / (Type 'q' to quit)
+
+calc> 1+1
+Result: 1 + 1 = 2
+
+calc>
+Calculator exiting...
 MINI_OS: app exited cleanly.
 /transport/build >
 ```

@@ -34,7 +34,7 @@ This document only describes code/file responsibilities.
 
 - `OS_src/kernel/idt.asm`
   - IDT table setup (`lidt`)
-  - `int 0x80` system call gate handler (`sys_exit`, `sys_write`)
+  - `int 0x80` system call gate handler (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
 
 ## 5. Driver Layer
 
@@ -71,13 +71,17 @@ This document only describes code/file responsibilities.
 
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
-  - `minilibc.h` / `minilibc.c`: C90 standard library wrappers (`printf`, `puts`, `write`, `exit`)
+  - `minilibc.h` / `minilibc.c`: C90 standard library & heap allocator (`malloc`/`free`)
+  - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 
 - `transport/apps/`
-  - C90 user application sources (e.g. `hello.c`, `calc.c`)
+  - C90 user application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`)
+
+- `transport/lib_test/`
+  - dedicated C library test suites (`test_string.c`, `test_heap.c`)
 
 - `transport/build/`
-  - compiled flat binary outputs (e.g. `hello.bin`, `calc.bin`)
+  - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
 ## 9. Build Definition
 

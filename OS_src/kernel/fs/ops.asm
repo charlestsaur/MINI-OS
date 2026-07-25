@@ -61,7 +61,7 @@ fs_create_file_in_dir:
     cmp eax, 0
     jne .write_fail
 
-    xor eax, eax
+    mov eax, [tmp_child_inode]
     pop ecx
     pop ebx
     ret

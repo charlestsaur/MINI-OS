@@ -1,15 +1,15 @@
 # MINI-OS
 
-> [!WARNING]
+Currently, MINI-OS is a very small x86 32-bit pure assembly operating system.
+
+MINI-OS supports running ANSI C90 C programs with dynamic memory allocation (malloc/free) and standard library support, excluding floating-point operations (float/double).
+
+> [!NOTE]
 > MINI-OS is only an experimental system and is far from perfect.
 
 Thanks to Gemini, Gork, GPT, and Mistral for their support.
 
 The documentation and some comments were written by Gemini and GPT. A small part of the code was developed in collaboration with Gemini and GPT.
-
-Currently, MINI-OS is a very small x86 32-bit pure assembly operating system.
-
-MINI-OS supports running C90-standard C programs that do not use dynamic memory allocation (malloc/free) or floating-point operations (float/double).
 
 ![](/docs/image/OS-demo.png)
 
@@ -24,10 +24,11 @@ MINI-OS supports running C90-standard C programs that do not use dynamic memory 
 - VGA text console and polling keyboard input
 - ATA PIO disk I/O (`LBA28`, sector read/write)
 - Custom filesystem with persistent directory tree
-- IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_write`)
+- IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
 - Executable loader (`run <file>`) for multi-sector flat binaries at `0x00040000`
-- C90 application runtime (`CRT0` + `MiniLibC`)
-- Host-side disk transport tool (`tools/inject_transport.c`) for inject `/external/` files
+- C90 application runtime with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
+- ANSI C90 standard headers (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`)
+- Host-side disk transport tool (`tools/inject_transport.c`) for inject `/transport/` files
 - Built-in shell commands:
   `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `run <file>`, `format`
 
@@ -35,10 +36,14 @@ MINI-OS supports running C90-standard C programs that do not use dynamic memory 
 
 - `OS_src/boot/`: bootloader sources
 - `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
-- `tools/`: host build tools (`inject_transport.c`)
-- `transport/`: host files injected into `/external/` on disk image (includes C90 `hello.c`, `minilibc`, `crt0.asm`)
+- `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`)
+- `transport/`: host files injected into `/transport/` on disk image
+  - `transport/lib/`: C90 runtime library, `crt0.asm`, and standard C header wrappers
+  - `transport/apps/`: user C applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`)
+  - `transport/lib_test/`: dedicated C library test suites (`test_string.c`, `test_heap.c`)
+  - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
 - `docs/`: project documentation
-- `build/`: generated binaries and disk image
+- `build/`: generated kernel binaries and disk image
 
 ## Requirements
 

@@ -259,6 +259,7 @@ kbd_read_text:
     ret
 
 kbd_shift_state db 0
+kbd_ctrl_state db 0
 
 ; OUT: AL = ASCII char, 0 if unsupported/key release
 kbd_read_char_blocking:
@@ -281,8 +282,35 @@ kbd_read_char_blocking:
     cmp al, 0xB6        ; Right Shift release
     je .shift_off
 
+    ; Check Ctrl make/break codes
+    cmp al, 0x1D        ; Ctrl press
+    je .ctrl_on
+    cmp al, 0x9D        ; Ctrl release
+    je .ctrl_off
+
     cmp al, 0x80
     jae .unsupported    ; Ignore other key releases (>= 0x80)
+
+    ; Check Ctrl combinations
+    cmp byte [kbd_ctrl_state], 1
+    jne .not_ctrl_combo
+    cmp al, 0x2E        ; Ctrl + C
+    je .ctrl_c
+    cmp al, 0x1F        ; Ctrl + S
+    je .ctrl_s
+    cmp al, 0x10        ; Ctrl + Q
+    je .ctrl_q
+
+.not_ctrl_combo:
+    ; Arrow keys
+    cmp al, 0x48        ; Up Arrow
+    je .arrow_up
+    cmp al, 0x50        ; Down Arrow
+    je .arrow_down
+    cmp al, 0x4B        ; Left Arrow
+    je .arrow_left
+    cmp al, 0x4D        ; Right Arrow
+    je .arrow_right
 
     ; Special keys
     cmp al, 0x1C        ; Enter
@@ -340,7 +368,46 @@ kbd_read_char_blocking:
     xor al, al
     ret
 
+.ctrl_on:
+    mov byte [kbd_ctrl_state], 1
+    xor al, al
+    ret
+
+.ctrl_off:
+    mov byte [kbd_ctrl_state], 0
+    xor al, al
+    ret
+
+.ctrl_c:
+    mov al, 3
+    ret
+
+.ctrl_s:
+    mov al, 19
+    ret
+
+.ctrl_q:
+    mov al, 17
+    ret
+
+.arrow_up:
+    mov al, 11
+    ret
+
+.arrow_down:
+    mov al, 12
+    ret
+
+.arrow_left:
+    mov al, 14
+    ret
+
+.arrow_right:
+    mov al, 15
+    ret
+
 .enter:
+
     mov al, 13
     ret
 
@@ -687,7 +754,11 @@ vga_putc:
     call vga_backspace
 
 .done:
+    cmp byte [cursor_auto_sync], 1
+    jne .skip_sync
     call vga_sync_cursor
+
+.skip_sync:
     pop edi
     pop edx
     pop ebx
@@ -831,3 +902,5 @@ vga_print_name:
     pop ecx
     pop eax
     ret
+
+cursor_auto_sync db 1
