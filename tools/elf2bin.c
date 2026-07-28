@@ -169,13 +169,17 @@ int main(int argc, char *argv[]) {
             Elf32_Shdr *sh = &objs[o].shdrs[i];
             const char *sec_name = objs[o].shstrtab + sh->sh_name;
 
-            if (sh->sh_type == SHT_PROGBITS && (sh->sh_flags & 2)) { // SHF_ALLOC = 2
+            if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) && (sh->sh_flags & 2)) { // SHF_ALLOC = 2
                 // Align out_size
                 uint32_t align = sh->sh_addralign ? sh->sh_addralign : 4;
                 out_size = (out_size + align - 1) & ~(align - 1);
 
                 objs[o].section_out_offs[i] = out_size;
-                memcpy(out_buf + out_size, objs[o].file_data + sh->sh_offset, sh->sh_size);
+                if (sh->sh_type == SHT_PROGBITS) {
+                    memcpy(out_buf + out_size, objs[o].file_data + sh->sh_offset, sh->sh_size);
+                } else {
+                    memset(out_buf + out_size, 0, sh->sh_size);
+                }
                 out_size += sh->sh_size;
             }
         }

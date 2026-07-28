@@ -2,6 +2,7 @@
 ; ATA PIO (LBA28)
 ; ----------------------------
 ; IN: EAX=lba, EDI=destination buffer (512 bytes)
+; OUT: CF clear on success, set on failure
 ata_read_sector_lba28:
     push eax
     push ebx
@@ -11,6 +12,7 @@ ata_read_sector_lba28:
 
     mov ebx, eax
     call ata_wait_not_busy
+    jc .fail
 
     mov dx, ATA_SECTOR_COUNT
     mov al, 1
@@ -40,11 +42,17 @@ ata_read_sector_lba28:
     out dx, al
 
     call ata_wait_drq
+    jc .fail
 
     mov dx, ATA_DATA_PORT
     mov ecx, 256
     rep insw
+    clc
+    jmp .done
 
+.fail:
+    stc
+.done:
     pop edi
     pop edx
     pop ecx
@@ -53,6 +61,7 @@ ata_read_sector_lba28:
     ret
 
 ; IN: EAX=lba, ESI=source buffer (512 bytes)
+; OUT: CF clear on success, set on failure
 ata_write_sector_lba28:
     push eax
     push ebx
@@ -62,6 +71,7 @@ ata_write_sector_lba28:
 
     mov ebx, eax
     call ata_wait_not_busy
+    jc .fail
 
     mov dx, ATA_SECTOR_COUNT
     mov al, 1
@@ -91,6 +101,7 @@ ata_write_sector_lba28:
     out dx, al
 
     call ata_wait_drq
+    jc .fail
 
     mov dx, ATA_DATA_PORT
     mov ecx, 256
@@ -100,7 +111,13 @@ ata_write_sector_lba28:
     mov al, 0xE7
     out dx, al
     call ata_wait_not_busy
+    jc .fail
+    clc
+    jmp .done
 
+.fail:
+    stc
+.done:
     pop esi
     pop edx
     pop ecx
@@ -115,9 +132,17 @@ ata_wait_not_busy:
 .wait:
     mov dx, ATA_COMMAND_STATUS
     in al, dx
+    test al, 0x21
+    jnz .fail
     test al, 0x80
-    jz .done
+    jz .ready
     loop .wait
+    jmp .fail
+.ready:
+    clc
+    jmp .done
+.fail:
+    stc
 .done:
     pop edx
     pop ecx
@@ -130,13 +155,21 @@ ata_wait_drq:
 .wait:
     mov dx, ATA_COMMAND_STATUS
     in al, dx
+    test al, 0x21
+    jnz .fail
     test al, 0x80
     jnz .cont
     test al, 0x08
     jnz .ready
 .cont:
     loop .wait
+    jmp .fail
 .ready:
+    clc
+    jmp .done
+.fail:
+    stc
+.done:
     pop edx
     pop ecx
     ret

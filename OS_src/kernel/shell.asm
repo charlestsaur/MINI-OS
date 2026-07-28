@@ -98,6 +98,8 @@ shell_dispatch:
 
 .ls:
     call fs_list_cwd
+    cmp eax, FS_OK
+    jl .fs_error
     jmp .done
 
 .pwd:
@@ -111,13 +113,9 @@ shell_dispatch:
     test esi, esi
     jz .cd_usage
     call fs_change_dir_path
-    cmp eax, 0
+    cmp eax, FS_OK
     je .done
-    cmp eax, -2
-    je .not_dir
-    mov esi, msg_not_found
-    call vga_print
-    jmp .done
+    jmp .fs_error
 .cd_usage:
     mov esi, msg_usage_cd
     call vga_print
@@ -128,19 +126,9 @@ shell_dispatch:
     test esi, esi
     jz .mkdir_usage
     call fs_create_dir_path
-    cmp eax, 0
+    cmp eax, FS_OK
     je .mkdir_ok
-    cmp eax, -1
-    je .exists
-    cmp eax, -2
-    je .no_inode
-    cmp eax, -3
-    je .no_data
-    cmp eax, -4
-    je .invalid_path
-    mov esi, msg_not_dir
-    call vga_print
-    jmp .done
+    jmp .fs_error
 .mkdir_ok:
     mov esi, msg_mkdir_ok
     call vga_print
@@ -158,17 +146,9 @@ shell_dispatch:
     test esi, esi
     jz .touch_usage
     call fs_create_file_path
-    cmp eax, 0
+    cmp eax, FS_OK
     jge .touch_ok
-    cmp eax, -1
-    je .exists
-    cmp eax, -2
-    je .no_inode
-    cmp eax, -4
-    je .invalid_path
-    mov esi, msg_not_dir
-    call vga_print
-    jmp .done
+    jmp .fs_error
 .touch_ok:
     mov esi, msg_touch_ok
     call vga_print
@@ -208,15 +188,11 @@ shell_dispatch:
     test esi, esi
     jz .rm_usage
     call fs_remove_path
-    cmp eax, 0
+    cmp eax, FS_OK
     je .rm_ok
-    cmp eax, -2
-    je .not_empty
-    cmp eax, -3
+    cmp eax, FS_ERR_PROTECTED
     je .rm_deny
-    mov esi, msg_not_found
-    call vga_print
-    jmp .done
+    jmp .fs_error
 .rm_ok:
     mov esi, msg_rm_ok
     call vga_print
@@ -234,15 +210,11 @@ shell_dispatch:
     test edi, edi
     jz .mv_usage
     call fs_rename_path
-    cmp eax, 0
+    cmp eax, FS_OK
     je .mv_ok
-    cmp eax, -2
-    je .exists
-    cmp eax, -3
+    cmp eax, FS_ERR_INVALID
     je .mv_invalid
-    mov esi, msg_not_found
-    call vga_print
-    jmp .done
+    jmp .fs_error
 .mv_ok:
     mov esi, msg_mv_ok
     call vga_print
@@ -254,7 +226,8 @@ shell_dispatch:
 
 .format:
     call fs_format
-    call fs_set_cwd_root
+    cmp eax, FS_OK
+    jl .fs_error
     jmp .done
 
 .run:
@@ -320,7 +293,70 @@ shell_dispatch:
     call vga_print
     jmp .done
 
+.fs_error:
+    call shell_print_fs_error
+    jmp .done
+
 .done:
+    ret
+
+; IN: EAX=filesystem error
+shell_print_fs_error:
+    push esi
+    cmp eax, FS_ERR_NOT_FOUND
+    je .not_found
+    cmp eax, FS_ERR_EXISTS
+    je .exists
+    cmp eax, FS_ERR_NOT_DIR
+    je .not_dir
+    cmp eax, FS_ERR_NOT_EMPTY
+    je .not_empty
+    cmp eax, FS_ERR_INVALID
+    je .invalid
+    cmp eax, FS_ERR_NO_INODE
+    je .no_inode
+    cmp eax, FS_ERR_NO_DATA
+    je .no_data
+    cmp eax, FS_ERR_IO
+    je .io
+    cmp eax, FS_ERR_PROTECTED
+    je .protected
+    cmp eax, FS_ERR_PATH_TOO_LONG
+    je .too_long
+    mov esi, msg_fs_corrupt
+    jmp .print
+.not_found:
+    mov esi, msg_not_found
+    jmp .print
+.exists:
+    mov esi, msg_exists
+    jmp .print
+.not_dir:
+    mov esi, msg_not_dir
+    jmp .print
+.not_empty:
+    mov esi, msg_not_empty
+    jmp .print
+.invalid:
+    mov esi, msg_invalid_path
+    jmp .print
+.no_inode:
+    mov esi, msg_no_inode
+    jmp .print
+.no_data:
+    mov esi, msg_no_data
+    jmp .print
+.io:
+    mov esi, msg_fs_io
+    jmp .print
+.protected:
+    mov esi, msg_rm_deny
+    jmp .print
+.too_long:
+    mov esi, msg_path_too_long
+.print:
+    call vga_print
+    pop esi
     ret
 
 ; IN: ESI = line buffer, modifies it by replacing spaces with 0
@@ -383,11 +419,13 @@ cut_token:
 shell_cat:
     push esi
     call fs_lookup_path
-    cmp eax, -1
-    je .not_found
+    cmp eax, FS_OK
+    jl .fs_error
 
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl .fs_error
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
     jne .not_file
 
@@ -399,13 +437,10 @@ shell_cat:
     je .empty
 
     mov eax, [BUF_INODE + INODE_START_OFF]
-    cmp eax, FS_DATA_START_LBA
-    jl .not_file
-    mov edx, FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT
-    cmp eax, edx
-    jge .not_file
+    add eax, FS_DATA_START_LBA
     mov edi, BUF_TEXT
     call ata_read_sector_lba28
+    jc .io
 
     mov esi, BUF_TEXT
     call vga_print_n
@@ -425,9 +460,10 @@ shell_cat:
     pop esi
     ret
 
-.not_found:
-    mov esi, msg_not_found
-    call vga_print
+.io:
+    mov eax, FS_ERR_IO
+.fs_error:
+    call shell_print_fs_error
     pop esi
     ret
 
@@ -435,7 +471,7 @@ shell_cat:
 shell_edit:
     push esi
     call fs_lookup_path
-    cmp eax, -1
+    cmp eax, FS_ERR_NOT_FOUND
     jne .have_inode
 
     pop esi
@@ -447,13 +483,17 @@ shell_edit:
     pop esi
     push esi
     call fs_lookup_path
-    cmp eax, -1
-    je .create_fail
+    cmp eax, FS_OK
+    jl .create_fail
 
 .have_inode:
+    cmp eax, FS_OK
+    jl .lookup_fail
     mov [tmp_inode_idx], eax
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl .lookup_fail
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
     jne .not_file
 
@@ -468,17 +508,17 @@ shell_edit:
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     jne .have_block
 
-    call fs_alloc_data_block
-    cmp eax, -1
-    je .no_data
+    call fs_fat_alloc_block
+    cmp eax, FS_OK
+    jl .lookup_fail
     mov [BUF_INODE + INODE_START_OFF], eax
     mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
 
 .have_block:
     mov eax, [BUF_INODE + INODE_START_OFF]
-    cmp eax, FS_DATA_START_LBA
+    cmp eax, 2
     jl .bad_block
-    mov edx, FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT
+    mov edx, FS_DATA_BLOCK_COUNT
     cmp eax, edx
     jge .bad_block
 
@@ -492,8 +532,10 @@ shell_edit:
     call copy_bytes
 
     mov eax, [BUF_INODE + INODE_START_OFF]
+    add eax, FS_DATA_START_LBA
     mov esi, BUF_SECTOR
     call ata_write_sector_lba28
+    jc .io_fail
 
     mov eax, [tmp_data_lba]
     mov [BUF_INODE + INODE_SIZE_OFF], eax
@@ -501,6 +543,8 @@ shell_edit:
     mov eax, [tmp_inode_idx]
     mov esi, BUF_INODE
     call fs_write_inode
+    cmp eax, FS_OK
+    jl .lookup_fail
 
     mov esi, msg_edit_ok
     call vga_print
@@ -508,8 +552,7 @@ shell_edit:
     ret
 
 .create_fail:
-    mov esi, msg_no_inode
-    call vga_print
+    call shell_print_fs_error
     pop esi
     ret
 
@@ -531,6 +574,13 @@ shell_edit:
     pop esi
     ret
 
+.io_fail:
+    mov eax, FS_ERR_IO
+.lookup_fail:
+    call shell_print_fs_error
+    pop esi
+    ret
+
 ; ----------------------------
 ; Executable Runner
 ; ----------------------------
@@ -540,12 +590,14 @@ shell_run:
     push edi
 
     call fs_lookup_path
-    cmp eax, -1
-    je near shell_run_not_found
+    cmp eax, FS_OK
+    jl near shell_run_fs_error
 
     mov [tmp_inode_idx], eax
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl near shell_run_fs_error
 
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
     jne near shell_run_not_file
@@ -663,5 +715,11 @@ shell_run_not_file:
 shell_run_not_found:
     mov esi, msg_not_found
     call vga_print
+    pop esi
+    ret
+
+shell_run_fs_error:
+    call shell_print_fs_error
+    pop edi
     pop esi
     ret

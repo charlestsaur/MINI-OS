@@ -224,9 +224,13 @@ syscall_entry:
     mov [tmp_fd_slot], ecx
 
     call fs_lookup_path
-    cmp eax, -1
-    jne near .sys_open_exists
+    cmp eax, FS_ERR_NOT_FOUND
+    je .sys_open_missing
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+    jmp near .sys_open_exists
 
+.sys_open_missing:
     test edx, 2
     jz near .sys_open_fail
 
@@ -241,8 +245,8 @@ syscall_entry:
     mov esi, ebx
     call fs_lookup_path
     pop ebx
-    cmp eax, -1
-    je near .sys_open_fail
+    cmp eax, FS_OK
+    jl near .sys_open_fail
 
 .sys_open_exists:
     mov [tmp_open_inode], eax
@@ -252,28 +256,80 @@ syscall_entry:
 
     mov edi, BUF_INODE
     call fs_read_inode
-    mov dword [BUF_INODE + INODE_SIZE_OFF], 0
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+
+    cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
+    je .sys_open_empty_inode
 
     mov eax, [BUF_INODE + INODE_START_OFF]
-    cmp eax, 0
-    je .sys_open_no_block_zero
-    push eax
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    mov [tmp_chain_count], ecx
+    mov ebx, ecx
+    dec ebx
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    call fs_fat_read_entry
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+    mov [tmp_chain_next], eax
+
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, FS_FAT_EOC
+    call fs_fat_write_entry
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+
+    mov dword [BUF_INODE + INODE_SIZE_OFF], 0
+    mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
+    mov eax, [tmp_open_inode]
+    mov esi, BUF_INODE
+    call fs_write_inode
+    cmp eax, FS_OK
+    jl .sys_open_restore_fat
+
+    mov eax, [tmp_chain_next]
+    cmp eax, FS_FAT_EOC
+    je .sys_open_zero_first
+    mov ecx, [tmp_chain_count]
+    dec ecx
+    call fs_fat_free_chain
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+
+.sys_open_zero_first:
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    add eax, FS_DATA_START_LBA
     push edi
     push esi
     mov edi, BUF_SECTOR
     call zero_sector
     pop esi
     pop edi
-    pop eax
     push esi
     mov esi, BUF_SECTOR
     call ata_write_sector_lba28
     pop esi
+    jc near .sys_open_fail
+    jmp .sys_open_skip_truncate
 
-.sys_open_no_block_zero:
+.sys_open_empty_inode:
+    mov dword [BUF_INODE + INODE_SIZE_OFF], 0
     mov eax, [tmp_open_inode]
     mov esi, BUF_INODE
     call fs_write_inode
+    cmp eax, FS_OK
+    jl near .sys_open_fail
+    jmp .sys_open_skip_truncate
+
+.sys_open_restore_fat:
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, [tmp_chain_next]
+    call fs_fat_write_entry
+    jmp near .sys_open_fail
 
 .sys_open_skip_truncate:
 
@@ -338,6 +394,8 @@ syscall_entry:
     mov eax, [file_table + eax + 4]
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl near .sys_rf_err
 
     mov eax, [tmp_fd_idx]
     mov esi, [file_table + eax + 8]
@@ -363,14 +421,20 @@ syscall_entry:
     cmp dword [tmp_rw_count], 0
     je near .sys_rf_done
 
-    mov eax, esi
-    shr eax, 9
-    add eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, esi
+    shr ebx, 9
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl near .sys_rf_err
+    add eax, FS_DATA_START_LBA
 
     mov ebx, edi
     mov edi, BUF_SECTOR
     call ata_read_sector_lba28
     mov edi, ebx
+    jc near .sys_rf_err
 
     mov ebx, esi
     and ebx, 511
@@ -445,18 +509,33 @@ syscall_entry:
     mov [tmp_open_inode], eax
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl near .sys_wf_err
 
-    cmp dword [BUF_INODE + INODE_START_OFF], 0
+    cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     jne near .sys_wf_has_block
 
-    call fs_alloc_data_block
-    cmp eax, -1
-    je near .sys_wf_err
+    call fs_fat_alloc_block
+    cmp eax, FS_OK
+    jl near .sys_wf_err
     mov [BUF_INODE + INODE_START_OFF], eax
     mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
     mov eax, [tmp_open_inode]
+    push esi
     mov esi, BUF_INODE
     call fs_write_inode
+    pop esi
+    cmp eax, FS_OK
+    jl .sys_wf_initial_rollback
+    jmp .sys_wf_has_block
+
+.sys_wf_initial_rollback:
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ecx, 1
+    call fs_fat_free_chain
+    mov dword [BUF_INODE + INODE_START_OFF], 0
+    mov dword [BUF_INODE + INODE_BLOCKS_OFF], 0
+    jmp near .sys_wf_err
 
 .sys_wf_has_block:
     mov eax, [tmp_fd_idx]
@@ -473,13 +552,85 @@ syscall_entry:
 
     mov eax, esi
     shr eax, 9
-    add eax, [BUF_INODE + INODE_START_OFF]
+    cmp eax, FS_DATA_BLOCK_COUNT
+    jae near .sys_wf_err
+    mov [tmp_target_block], eax
+
+.sys_wf_ensure_capacity:
+    mov eax, [tmp_target_block]
+    cmp eax, [BUF_INODE + INODE_BLOCKS_OFF]
+    jb .sys_wf_have_capacity
+
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    cmp ecx, 1
+    jb near .sys_wf_err
+    mov ebx, ecx
+    dec ebx
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+    mov [tmp_chain_block], eax
+
+    call fs_fat_alloc_block
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+    mov [tmp_chain_next], eax
+
+    mov ebx, eax
+    mov eax, [tmp_chain_block]
+    call fs_fat_write_entry
+    cmp eax, FS_OK
+    jl .sys_wf_free_unlinked
+
+    inc dword [BUF_INODE + INODE_BLOCKS_OFF]
+    mov eax, [tmp_open_inode]
+    push esi
+    mov esi, BUF_INODE
+    call fs_write_inode
+    pop esi
+    cmp eax, FS_OK
+    jl .sys_wf_rollback_link
+    jmp .sys_wf_ensure_capacity
+
+.sys_wf_free_unlinked:
+    mov eax, [tmp_chain_block]
+    mov ebx, FS_FAT_EOC
+    call fs_fat_write_entry
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+    mov eax, [tmp_chain_next]
+    mov ecx, 1
+    call fs_fat_free_chain
+    jmp near .sys_wf_err
+
+.sys_wf_rollback_link:
+    dec dword [BUF_INODE + INODE_BLOCKS_OFF]
+    mov eax, [tmp_chain_block]
+    mov ebx, FS_FAT_EOC
+    call fs_fat_write_entry
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+    mov eax, [tmp_chain_next]
+    mov ecx, 1
+    call fs_fat_free_chain
+    jmp near .sys_wf_err
+
+.sys_wf_have_capacity:
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, [tmp_target_block]
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+    add eax, FS_DATA_START_LBA
     mov [tmp_sector_lba], eax
 
     mov ebx, edi
     mov edi, BUF_SECTOR
     call ata_read_sector_lba28
     mov edi, ebx
+    jc near .sys_wf_err
 
     mov ebx, esi
     and ebx, 511
@@ -512,6 +663,7 @@ syscall_entry:
     call ata_write_sector_lba28
     pop esi
     pop eax
+    jc near .sys_wf_err
 
     add edi, edx
     add esi, edx
@@ -522,10 +674,19 @@ syscall_entry:
 .sys_wf_done:
     mov eax, [tmp_fd_idx]
     mov [file_table + eax + 8], esi
+
+    mov eax, [BUF_INODE + INODE_SIZE_OFF]
+    cmp esi, eax
+    jle .sys_wf_skip_size
     mov [BUF_INODE + INODE_SIZE_OFF], esi
+.sys_wf_skip_size:
     mov eax, [tmp_open_inode]
+    push esi
     mov esi, BUF_INODE
     call fs_write_inode
+    pop esi
+    cmp eax, FS_OK
+    jl near .sys_wf_err
 
     mov eax, [tmp_rw_done]
     jmp near .sys_wf_exit
@@ -562,6 +723,8 @@ syscall_entry:
     mov eax, [file_table + esi + 4]
     mov edi, BUF_INODE
     call fs_read_inode
+    cmp eax, FS_OK
+    jl near .sys_seek_err
     mov eax, [BUF_INODE + INODE_SIZE_OFF]
 
     cmp edx, 0
@@ -697,4 +860,5 @@ tmp_fd_idx dd 0
 tmp_rw_count dd 0
 tmp_rw_done dd 0
 tmp_sector_lba dd 0
+tmp_target_block dd 0
 file_table times 256 db 0

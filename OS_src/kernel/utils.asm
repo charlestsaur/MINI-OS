@@ -114,6 +114,29 @@ str_eq_ci:
     pop ebx
     ret
 
+; IN: ESI=str1, EDI=str2 (both 0-terminated)
+; OUT: AL=1 equal, 0 not equal (case-sensitive)
+str_eq:
+    push ebx
+.loop:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .no
+    test al, al
+    jz .yes
+    inc esi
+    inc edi
+    jmp .loop
+.yes:
+    mov al, 1
+    pop ebx
+    ret
+.no:
+    xor al, al
+    pop ebx
+    ret
+
 ; IN: ESI=input string, EDI=inode name field (27 bytes)
 ; OUT: AL=1 equal, 0 not equal (case-insensitive)
 name_field_eq_input:

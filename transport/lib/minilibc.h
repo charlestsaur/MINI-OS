@@ -37,9 +37,6 @@ void clear_screen(void);
 void save_screen(void);
 void restore_screen(void);
 
-
-
-
 /* File Stream I/O Functions */
 FILE *fopen(const char *filename, const char *mode);
 int fclose(FILE *stream);
@@ -51,8 +48,6 @@ void rewind(FILE *stream);
 int fflush(FILE *stream);
 int feof(FILE *stream);
 int ferror(FILE *stream);
-
-
 
 /* <string.h> Functions */
 size_t strlen(const char *s);
@@ -85,6 +80,7 @@ int ispunct(int c);
 int isxdigit(int c);
 int iscntrl(int c);
 int toupper(int c);
+
 /* <stdlib.h> Functions */
 void *malloc(size_t size);
 void free(void *ptr);

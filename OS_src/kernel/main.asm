@@ -23,16 +23,26 @@ ATA_CMD_WRITE       equ 0x30
 KBD_STATUS_PORT     equ 0x64
 KBD_DATA_PORT       equ 0x60
 
-FS_MAGIC            equ 0x534F5359          ; "SOSY"
-FS_INODE_COUNT      equ 2048
-FS_DATA_BLOCK_COUNT equ 4096
-FS_SUPERBLOCK_LBA   equ 101
-FS_INODE_BMAP_LBA   equ 102
-FS_DATA_BMAP_LBA    equ 103
-FS_DATA_BMAP_SECS   equ 8
-FS_INODE_START_LBA  equ 111
-FS_INODE_SECS       equ 256
-FS_DATA_START_LBA   equ 367
+%define FS_LAYOUT_CONST(name, value) name equ value
+%include "OS_src/kernel/fs/layout.def"
+%undef FS_LAYOUT_CONST
+
+FS_OK                equ 0
+FS_ERR_NOT_FOUND     equ -1
+FS_ERR_EXISTS        equ -2
+FS_ERR_NOT_DIR       equ -3
+FS_ERR_NOT_EMPTY     equ -4
+FS_ERR_INVALID       equ -5
+FS_ERR_NO_INODE      equ -6
+FS_ERR_NO_DATA       equ -7
+FS_ERR_IO            equ -8
+FS_ERR_CORRUPT       equ -9
+FS_ERR_PROTECTED     equ -10
+FS_ERR_PATH_TOO_LONG equ -11
+
+FS_MAX_PATH          equ 127
+FS_MAX_DEPTH         equ 32
+FS_FAT_EOC           equ 0xFFFF
 
 INODE_SIZE          equ 64
 INODE_NAME_LEN      equ 27
@@ -57,8 +67,12 @@ BUF_TEXT            equ 0x23000
 BUF_INODE           equ 0x24000
 BUF_CMD             equ 0x25000
 PATH_PARENT_BUF     equ BUF_TEXT
-PATH_NAME_BUF       equ BUF_TEXT + 64
-PATH_PART_BUF       equ BUF_TEXT + 128
+PATH_NAME_BUF       equ BUF_TEXT + 256
+PATH_PART_BUF       equ BUF_TEXT + 512
+PATH_OLD_NAME_BUF   equ BUF_TEXT + 544
+PATH_NEW_NAME_BUF   equ BUF_TEXT + 576
+FS_VISITED_BUF      equ BUF_TEXT + 1024
+PATH_BUILD_BUF      equ BUF_TEXT + 1536
 
 cursor_row          dd 0
 cursor_col          dd 0
@@ -81,6 +95,13 @@ tmp_mv_old_parent   dd 0
 tmp_mv_new_parent   dd 0
 tmp_mv_old_path     dd 0
 tmp_mv_new_path     dd 0
+tmp_chain_block     dd 0
+tmp_chain_next      dd 0
+tmp_chain_count     dd 0
+tmp_alloc_block     dd 0
+tmp_old_entry_idx   dd 0
+tmp_new_entry_idx   dd 0
+tmp_cwd_affected    db 0
 saved_kernel_esp    dd 0
 
 kernel_start:
@@ -93,6 +114,8 @@ kernel_start:
 
     call idt_init
     call fs_bootstrap
+    cmp eax, FS_OK
+    jne kernel_fs_fatal
     call fs_set_cwd_root
 
     mov esi, msg_ready
@@ -111,6 +134,13 @@ shell_loop:
     mov esi, BUF_CMD
     call shell_dispatch
     jmp shell_loop
+
+kernel_fs_fatal:
+    mov esi, msg_fs_fatal
+    call vga_print
+    cli
+    hlt
+    jmp kernel_fs_fatal
 
 %include "OS_src/kernel/idt.asm"
 %include "OS_src/kernel/shell.asm"
@@ -141,9 +171,13 @@ msg_empty          db "(empty)", 10, 0
 msg_exists         db "Entry already exists.", 10, 0
 msg_no_inode       db "No free inode available.", 10, 0
 msg_no_data        db "No free data block available.", 10, 0
-msg_rm_deny        db "Cannot remove root directory.", 10, 0
+msg_rm_deny        db "Cannot remove root, current directory, or its ancestor.", 10, 0
 msg_invalid_path   db "Invalid path or name.", 10, 0
 msg_mv_invalid     db "Invalid move target.", 10, 0
+msg_fs_io          db "Filesystem I/O failed.", 10, 0
+msg_fs_corrupt     db "Filesystem metadata is corrupt.", 10, 0
+msg_path_too_long  db "Path is too deep or too long.", 10, 0
+msg_fs_fatal       db "MINI_OS: filesystem unavailable; system halted.", 10, 0
 
 msg_usage_cd       db "Usage: cd <dir>", 10, 0
 msg_usage_mkdir    db "Usage: mkdir <dir>", 10, 0

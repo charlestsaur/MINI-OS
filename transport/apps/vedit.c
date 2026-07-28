@@ -86,7 +86,7 @@ static void save_to_file(void) {
         if (line_lengths[r] > 0) {
             fwrite(text_buffer[r], 1, line_lengths[r], fp);
         }
-        if (r < num_rows - 1 || line_lengths[r] > 0) {
+        if (r < num_rows - 1) {
             fwrite("\n", 1, 1, fp);
         }
     }
@@ -248,6 +248,7 @@ int main(int argc, char **argv) {
                 for (i = cur_col - 1; i < line_lengths[cur_row] - 1; i++) {
                     text_buffer[cur_row][i] = text_buffer[cur_row][i + 1];
                 }
+                text_buffer[cur_row][line_lengths[cur_row] - 1] = 0;
                 line_lengths[cur_row]--;
                 cur_col--;
                 is_modified = 1;
@@ -257,21 +258,25 @@ int main(int argc, char **argv) {
                 int prev_len = line_lengths[prev_row];
                 int curr_len = line_lengths[cur_row];
 
-                if (prev_len + curr_len < MAX_COLS - 1) {
+                if (prev_len + curr_len < MAX_COLS) {
                     memcpy(text_buffer[prev_row] + prev_len, text_buffer[cur_row], curr_len);
                     line_lengths[prev_row] += curr_len;
-                }
+                    text_buffer[prev_row][line_lengths[prev_row]] = 0;
 
-                for (i = cur_row; i < num_rows - 1; i++) {
-                    memcpy(text_buffer[i], text_buffer[i + 1], MAX_COLS);
-                    line_lengths[i] = line_lengths[i + 1];
-                }
-                num_rows--;
-                if (num_rows == 0) num_rows = 1;
+                    for (i = cur_row; i < num_rows - 1; i++) {
+                        memcpy(text_buffer[i], text_buffer[i + 1], MAX_COLS);
+                        line_lengths[i] = line_lengths[i + 1];
+                    }
+                    memset(text_buffer[num_rows - 1], 0, MAX_COLS);
+                    line_lengths[num_rows - 1] = 0;
+                    
+                    num_rows--;
+                    if (num_rows == 0) num_rows = 1;
 
-                cur_row = prev_row;
-                cur_col = prev_len;
-                is_modified = 1;
+                    cur_row = prev_row;
+                    cur_col = prev_len;
+                    is_modified = 1;
+                }
             }
             continue;
         }
@@ -281,13 +286,24 @@ int main(int argc, char **argv) {
         if (key == 13 || key == 10) {
             if (num_rows < MAX_ROWS) {
                 /* Move lines below down by 1 row */
-                for (i = num_rows; i > cur_row + 1; i--) {
+                for (i = num_rows; i > cur_row; i--) {
                     memcpy(text_buffer[i], text_buffer[i - 1], MAX_COLS);
                     line_lengths[i] = line_lengths[i - 1];
                 }
+                
+                int split_len = line_lengths[cur_row] - cur_col;
+                
+                /* cur_row+1 keeps the right part */
+                memmove(text_buffer[cur_row + 1], text_buffer[cur_row + 1] + cur_col, split_len);
+                line_lengths[cur_row + 1] = split_len;
+                memset(text_buffer[cur_row + 1] + split_len, 0, MAX_COLS - split_len);
+                
+                /* cur_row keeps the left part */
+                line_lengths[cur_row] = cur_col;
+                memset(text_buffer[cur_row] + cur_col, 0, MAX_COLS - cur_col);
+                
                 cur_row++;
                 num_rows++;
-                line_lengths[cur_row] = 0;
                 cur_col = 0;
                 is_modified = 1;
             }

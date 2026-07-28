@@ -2,6 +2,8 @@ BUILD_DIR := build
 SRC_DIR := OS_src
 BOOT_SRC := $(SRC_DIR)/boot/boot.asm
 KERNEL_SRC := $(SRC_DIR)/kernel/main.asm
+KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \))
+FS_LAYOUT_DEF := $(SRC_DIR)/kernel/fs/layout.def
 
 BOOT_BIN := $(BUILD_DIR)/boot.bin
 KERNEL_BIN := $(BUILD_DIR)/kernel.bin
@@ -41,7 +43,7 @@ $(BUILD_DIR):
 $(APP_BUILD_DIR):
 	mkdir -p $(APP_BUILD_DIR)
 
-$(INJECT_TOOL): tools/inject_transport.c | $(BUILD_DIR)
+$(INJECT_TOOL): tools/inject_transport.c $(FS_LAYOUT_DEF) | $(BUILD_DIR)
 	$(CC) -O2 tools/inject_transport.c -o $(INJECT_TOOL)
 
 $(ELF2BIN_TOOL): tools/elf2bin.c | $(BUILD_DIR)
@@ -77,7 +79,7 @@ app:
 	APP_NAME=$$(basename $(APP) .c); \
 	$(MAKE) $(APP_BUILD_DIR)/$$APP_NAME.bin
 
-$(KERNEL_BIN): $(KERNEL_SRC) | $(BUILD_DIR)
+$(KERNEL_BIN): $(KERNEL_DEPS) | $(BUILD_DIR)
 	$(NASM) -f bin $(KERNEL_SRC) -o $(KERNEL_BIN)
 
 $(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) | $(BUILD_DIR)
