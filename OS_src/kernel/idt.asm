@@ -40,44 +40,51 @@ idt_init:
 ; ----------------------------
 ; System Call Handler (int 0x80)
 ; ----------------------------
-; EAX = syscall number (1=sys_exit, 3=sys_read, 4=sys_write)
-; EBX = arg1 (exit_code / fd)
-; ECX = arg2 (buf)
-; EDX = arg3 (count)
+; MINI-OS syscall ABI:
+; EAX=number, EBX=arg1, ECX=arg2, EDX=arg3, EAX=return value.
+; All general-purpose registers except EAX are preserved.
+; Numbers, open flags, and negative errors come from transport/lib/syscall.def.
 syscall_entry:
-    cmp eax, 1
+    pushad
+
+    cmp eax, SYS_NR_EXIT
     je near .sys_exit
-    cmp eax, 3
+    cmp eax, SYS_NR_READ
     je near .sys_read
-    cmp eax, 4
+    cmp eax, SYS_NR_WRITE
     je near .sys_write
-    cmp eax, 5
+    cmp eax, SYS_NR_OPEN
     je near .sys_open
-    cmp eax, 6
+    cmp eax, SYS_NR_CLOSE
     je near .sys_close
-    cmp eax, 7
+    cmp eax, SYS_NR_GETKEY
     je near .sys_getkey
-    cmp eax, 12
+    cmp eax, SYS_NR_BRK
     je near .sys_brk
 
-    cmp eax, 14
+    cmp eax, SYS_NR_READ_FILE
     je near .sys_read_file
-    cmp eax, 15
+    cmp eax, SYS_NR_WRITE_FILE
     je near .sys_write_file
-    cmp eax, 19
+    cmp eax, SYS_NR_LSEEK
     je near .sys_lseek
-    cmp eax, 20
+    cmp eax, SYS_NR_MOVE_CURSOR
     je near .sys_move_cursor
-    cmp eax, 21
+    cmp eax, SYS_NR_CLEAR_SCREEN
     je near .sys_clear_screen
-    cmp eax, 22
+    cmp eax, SYS_NR_SET_CURSOR
     je near .sys_set_cursor_nosync
-    cmp eax, 23
+    cmp eax, SYS_NR_SAVE_SCREEN
     je near .sys_save_screen
-    cmp eax, 24
+    cmp eax, SYS_NR_RESTORE_SCREEN
     je near .sys_restore_screen
 
-    ; Unknown syscall -> iret
+    mov eax, SYS_ERR_INVALID
+    jmp .syscall_return
+
+.syscall_return:
+    mov [esp + 28], eax
+    popad
     iret
 
 .sys_exit:
@@ -114,7 +121,7 @@ syscall_entry:
 
 .sys_brk_done:
     mov eax, [current_brk]
-    iret
+    jmp .syscall_return
 
 .sys_read:
     push ebx
@@ -123,8 +130,13 @@ syscall_entry:
     push esi
     push edi
 
-    mov edi, ecx         ; Destination buffer
-    xor esi, esi         ; Bytes read counter = 0
+    cmp ebx, 0
+    jne .sys_read_bad_fd
+    test edx, edx
+    jz .sys_read_zero
+
+    mov edi, ecx
+    xor esi, esi
 
 .sys_read_loop:
     cmp esi, edx         ; Reached max requested bytes?
@@ -167,19 +179,29 @@ syscall_entry:
     jmp near .sys_read_loop
 
 .sys_read_newline:
-    mov byte [edi], 0    ; Null-terminate string buffer
     mov al, 10
-    call vga_putc        ; Echo newline
+    call vga_putc
+    jmp .sys_read_done
 
 .sys_read_done:
-    mov [tmp_read_cnt], esi ; Store result
+    mov [tmp_read_cnt], esi
+    jmp .sys_read_exit
+
+.sys_read_bad_fd:
+    mov dword [tmp_read_cnt], SYS_ERR_BAD_FD
+    jmp .sys_read_exit
+
+.sys_read_zero:
+    mov dword [tmp_read_cnt], 0
+
+.sys_read_exit:
     pop edi
     pop esi
     pop edx
     pop ecx
     pop ebx
-    mov eax, [tmp_read_cnt] ; Return byte count in EAX
-    iret
+    mov eax, [tmp_read_cnt]
+    jmp .syscall_return
 
 .sys_getkey:
 .sys_getkey_loop:
@@ -187,16 +209,24 @@ syscall_entry:
     test al, al
     jz .sys_getkey_loop
     movzx eax, al
-    iret
+    jmp .syscall_return
 
 .sys_write:
-
+    cmp ebx, 1
+    je .sys_write_fd_ok
+    cmp ebx, 2
+    jne .sys_write_bad_fd
+.sys_write_fd_ok:
     pusha
     mov esi, ecx            ; buffer pointer
     mov ecx, edx            ; length
     call vga_print_n
     popa
-    iret
+    mov eax, edx
+    jmp .syscall_return
+.sys_write_bad_fd:
+    mov eax, SYS_ERR_BAD_FD
+    jmp .syscall_return
 
 .sys_open:
     push ebx
@@ -205,8 +235,28 @@ syscall_entry:
     push esi
     push edi
 
-    mov esi, ebx            ; path
-    mov edx, ecx            ; flags
+    test ebx, ebx
+    jz near .sys_open_invalid
+    mov [tmp_open_flags], ecx
+    mov eax, ecx
+    test eax, 0xFFFFFFE0
+    jnz near .sys_open_invalid
+    test eax, SYS_OPEN_READ | SYS_OPEN_WRITE
+    jz near .sys_open_invalid
+    test eax, SYS_OPEN_TRUNCATE
+    jz .sys_open_check_append
+    test eax, SYS_OPEN_WRITE
+    jz near .sys_open_invalid
+.sys_open_check_append:
+    test eax, SYS_OPEN_APPEND
+    jz .sys_open_flags_ok
+    test eax, SYS_OPEN_WRITE
+    jz near .sys_open_invalid
+    test eax, SYS_OPEN_TRUNCATE
+    jnz near .sys_open_invalid
+
+.sys_open_flags_ok:
+    mov esi, ebx
 
     mov ecx, 3
 
@@ -227,37 +277,39 @@ syscall_entry:
     cmp eax, FS_ERR_NOT_FOUND
     je .sys_open_missing
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
     jmp near .sys_open_exists
 
 .sys_open_missing:
-    test edx, 2
-    jz near .sys_open_fail
+    test dword [tmp_open_flags], SYS_OPEN_CREATE
+    jz near .sys_open_invalid
 
     push ebx
     mov esi, ebx
     call fs_create_file_path
     pop ebx
     cmp eax, 0
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
 
     push ebx
     mov esi, ebx
     call fs_lookup_path
     pop ebx
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
 
 .sys_open_exists:
     mov [tmp_open_inode], eax
 
-    test edx, 2
-    jz .sys_open_skip_truncate
-
     mov edi, BUF_INODE
     call fs_read_inode
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
+    cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
+    jne near .sys_open_invalid
+
+    test dword [tmp_open_flags], SYS_OPEN_TRUNCATE
+    jz .sys_open_skip_truncate
 
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     je .sys_open_empty_inode
@@ -269,19 +321,19 @@ syscall_entry:
     dec ebx
     call fs_fat_get_nth_block
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
 
     mov eax, [BUF_INODE + INODE_START_OFF]
     call fs_fat_read_entry
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
     mov [tmp_chain_next], eax
 
     mov eax, [BUF_INODE + INODE_START_OFF]
     mov ebx, FS_FAT_EOC
     call fs_fat_write_entry
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
 
     mov dword [BUF_INODE + INODE_SIZE_OFF], 0
     mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
@@ -298,7 +350,7 @@ syscall_entry:
     dec ecx
     call fs_fat_free_chain
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
 
 .sys_open_zero_first:
     mov eax, [BUF_INODE + INODE_START_OFF]
@@ -313,7 +365,7 @@ syscall_entry:
     mov esi, BUF_SECTOR
     call ata_write_sector_lba28
     pop esi
-    jc near .sys_open_fail
+    jc near .sys_open_fs_fail
     jmp .sys_open_skip_truncate
 
 .sys_open_empty_inode:
@@ -322,14 +374,14 @@ syscall_entry:
     mov esi, BUF_INODE
     call fs_write_inode
     cmp eax, FS_OK
-    jl near .sys_open_fail
+    jl near .sys_open_fs_fail
     jmp .sys_open_skip_truncate
 
 .sys_open_restore_fat:
     mov eax, [BUF_INODE + INODE_START_OFF]
     mov ebx, [tmp_chain_next]
     call fs_fat_write_entry
-    jmp near .sys_open_fail
+    jmp near .sys_open_fs_fail
 
 .sys_open_skip_truncate:
 
@@ -338,15 +390,26 @@ syscall_entry:
     mov dword [file_table + ecx], 1
     mov eax, [tmp_open_inode]
     mov dword [file_table + ecx + 4], eax
-    mov dword [file_table + ecx + 8], 0
-    mov dword [file_table + ecx + 12], edx
+    xor eax, eax
+    test dword [tmp_open_flags], SYS_OPEN_APPEND
+    jz .sys_open_position_ready
+    mov eax, [BUF_INODE + INODE_SIZE_OFF]
+.sys_open_position_ready:
+    mov dword [file_table + ecx + 8], eax
+    mov eax, [tmp_open_flags]
+    mov dword [file_table + ecx + 12], eax
 
     mov eax, [tmp_fd_slot]
     jmp near .sys_open_done
 
 .sys_open_full:
-.sys_open_fail:
-    mov eax, -1
+    mov eax, SYS_ERR_BAD_FD
+    jmp .sys_open_done
+.sys_open_invalid:
+    mov eax, SYS_ERR_INVALID
+    jmp .sys_open_done
+.sys_open_fs_fail:
+    mov eax, SYS_ERR_IO
 
 .sys_open_done:
     pop edi
@@ -354,7 +417,7 @@ syscall_entry:
     pop edx
     pop ecx
     pop ebx
-    iret
+    jmp .syscall_return
 
 .sys_close:
     cmp ebx, 3
@@ -364,13 +427,15 @@ syscall_entry:
 
     mov eax, ebx
     shl eax, 4
+    cmp dword [file_table + eax], 1
+    jne near .sys_close_err
     mov dword [file_table + eax], 0
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 .sys_close_err:
-    mov eax, -1
-    iret
+    mov eax, SYS_ERR_BAD_FD
+    jmp .syscall_return
 
 .sys_read_file:
     push ebx
@@ -379,15 +444,20 @@ syscall_entry:
     push esi
     push edi
 
+    mov [tmp_rw_buffer], ecx
+    mov [tmp_rw_request], edx
+
     cmp ebx, 3
-    jl near .sys_rf_err
+    jl near .sys_rf_bad_fd
     cmp ebx, 16
-    jge near .sys_rf_err
+    jge near .sys_rf_bad_fd
 
     mov eax, ebx
     shl eax, 4
     cmp dword [file_table + eax], 1
-    jne near .sys_rf_err
+    jne near .sys_rf_bad_fd
+    test dword [file_table + eax + 12], SYS_OPEN_READ
+    jz near .sys_rf_access
 
     mov [tmp_fd_idx], eax
 
@@ -399,19 +469,17 @@ syscall_entry:
 
     mov eax, [tmp_fd_idx]
     mov esi, [file_table + eax + 8]
-    mov edi, ecx
-    mov ecx, edx
+    mov edi, [tmp_rw_buffer]
+    mov ecx, [tmp_rw_request]
     mov edx, [BUF_INODE + INODE_SIZE_OFF]
 
     cmp esi, edx
     jge near .sys_rf_eof
 
-    mov eax, esi
-    add eax, ecx
-    cmp eax, edx
-    jle near .sys_rf_count_ok
+    sub edx, esi
+    cmp ecx, edx
+    jbe near .sys_rf_count_ok
     mov ecx, edx
-    sub ecx, esi
 
 .sys_rf_count_ok:
     mov [tmp_rw_count], ecx
@@ -475,8 +543,14 @@ syscall_entry:
     xor eax, eax
     jmp near .sys_rf_exit
 
+.sys_rf_bad_fd:
+    mov eax, SYS_ERR_BAD_FD
+    jmp .sys_rf_exit
+.sys_rf_access:
+    mov eax, SYS_ERR_ACCESS
+    jmp .sys_rf_exit
 .sys_rf_err:
-    mov eax, -1
+    mov eax, SYS_ERR_IO
 
 .sys_rf_exit:
     pop edi
@@ -484,7 +558,7 @@ syscall_entry:
     pop edx
     pop ecx
     pop ebx
-    iret
+    jmp .syscall_return
 
 .sys_write_file:
     push ebx
@@ -493,17 +567,25 @@ syscall_entry:
     push esi
     push edi
 
+    mov [tmp_rw_buffer], ecx
+    mov [tmp_rw_request], edx
+
     cmp ebx, 3
-    jl near .sys_wf_err
+    jl near .sys_wf_bad_fd
     cmp ebx, 16
-    jge near .sys_wf_err
+    jge near .sys_wf_bad_fd
 
     mov eax, ebx
     shl eax, 4
     cmp dword [file_table + eax], 1
-    jne near .sys_wf_err
+    jne near .sys_wf_bad_fd
+    test dword [file_table + eax + 12], SYS_OPEN_WRITE
+    jz near .sys_wf_access
 
     mov [tmp_fd_idx], eax
+
+    test edx, edx
+    jz near .sys_wf_zero
 
     mov eax, [file_table + eax + 4]
     mov [tmp_open_inode], eax
@@ -511,6 +593,20 @@ syscall_entry:
     call fs_read_inode
     cmp eax, FS_OK
     jl near .sys_wf_err
+
+    mov eax, [tmp_fd_idx]
+    test dword [file_table + eax + 12], SYS_OPEN_APPEND
+    jz .sys_wf_position_ready
+    mov ecx, [BUF_INODE + INODE_SIZE_OFF]
+    mov [file_table + eax + 8], ecx
+.sys_wf_position_ready:
+    mov ecx, [file_table + eax + 8]
+    cmp ecx, FS_MAX_FILE_SIZE
+    ja near .sys_wf_range
+    mov eax, FS_MAX_FILE_SIZE
+    sub eax, ecx
+    cmp dword [tmp_rw_request], eax
+    ja near .sys_wf_range
 
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     jne near .sys_wf_has_block
@@ -540,8 +636,8 @@ syscall_entry:
 .sys_wf_has_block:
     mov eax, [tmp_fd_idx]
     mov esi, [file_table + eax + 8]
-    mov edi, ecx
-    mov ecx, edx
+    mov edi, [tmp_rw_buffer]
+    mov ecx, [tmp_rw_request]
 
     mov [tmp_rw_count], ecx
     mov dword [tmp_rw_done], 0
@@ -570,15 +666,15 @@ syscall_entry:
     call fs_fat_get_nth_block
     cmp eax, FS_OK
     jl near .sys_wf_err
-    mov [tmp_chain_block], eax
+    mov [tmp_wf_chain_block], eax
 
     call fs_fat_alloc_block
     cmp eax, FS_OK
     jl near .sys_wf_err
-    mov [tmp_chain_next], eax
+    mov [tmp_wf_chain_next], eax
 
     mov ebx, eax
-    mov eax, [tmp_chain_block]
+    mov eax, [tmp_wf_chain_block]
     call fs_fat_write_entry
     cmp eax, FS_OK
     jl .sys_wf_free_unlinked
@@ -594,24 +690,24 @@ syscall_entry:
     jmp .sys_wf_ensure_capacity
 
 .sys_wf_free_unlinked:
-    mov eax, [tmp_chain_block]
+    mov eax, [tmp_wf_chain_block]
     mov ebx, FS_FAT_EOC
     call fs_fat_write_entry
     cmp eax, FS_OK
     jl near .sys_wf_err
-    mov eax, [tmp_chain_next]
+    mov eax, [tmp_wf_chain_next]
     mov ecx, 1
     call fs_fat_free_chain
     jmp near .sys_wf_err
 
 .sys_wf_rollback_link:
     dec dword [BUF_INODE + INODE_BLOCKS_OFF]
-    mov eax, [tmp_chain_block]
+    mov eax, [tmp_wf_chain_block]
     mov ebx, FS_FAT_EOC
     call fs_fat_write_entry
     cmp eax, FS_OK
     jl near .sys_wf_err
-    mov eax, [tmp_chain_next]
+    mov eax, [tmp_wf_chain_next]
     mov ecx, 1
     call fs_fat_free_chain
     jmp near .sys_wf_err
@@ -691,8 +787,20 @@ syscall_entry:
     mov eax, [tmp_rw_done]
     jmp near .sys_wf_exit
 
+.sys_wf_zero:
+    xor eax, eax
+    jmp .sys_wf_exit
+.sys_wf_bad_fd:
+    mov eax, SYS_ERR_BAD_FD
+    jmp .sys_wf_exit
+.sys_wf_access:
+    mov eax, SYS_ERR_ACCESS
+    jmp .sys_wf_exit
+.sys_wf_range:
+    mov eax, SYS_ERR_RANGE
+    jmp .sys_wf_exit
 .sys_wf_err:
-    mov eax, -1
+    mov eax, SYS_ERR_IO
 
 .sys_wf_exit:
     pop edi
@@ -700,23 +808,24 @@ syscall_entry:
     pop edx
     pop ecx
     pop ebx
-    iret
+    jmp .syscall_return
 
 .sys_lseek:
     push ebx
     push ecx
     push edx
     push esi
+    push edi
 
     cmp ebx, 3
-    jl near .sys_seek_err
+    jl near .sys_seek_bad_fd
     cmp ebx, 16
-    jge near .sys_seek_err
+    jge near .sys_seek_bad_fd
 
     mov eax, ebx
     shl eax, 4
     cmp dword [file_table + eax], 1
-    jne near .sys_seek_err
+    jne near .sys_seek_bad_fd
 
     mov esi, eax
 
@@ -724,7 +833,7 @@ syscall_entry:
     mov edi, BUF_INODE
     call fs_read_inode
     cmp eax, FS_OK
-    jl near .sys_seek_err
+    jl near .sys_seek_io
     mov eax, [BUF_INODE + INODE_SIZE_OFF]
 
     cmp edx, 0
@@ -733,7 +842,7 @@ syscall_entry:
     je near .seek_cur
     cmp edx, 2
     je near .seek_end
-    jmp near .sys_seek_err
+    jmp near .sys_seek_invalid
 
 .seek_set:
     mov eax, ecx
@@ -742,29 +851,42 @@ syscall_entry:
 .seek_cur:
     mov eax, [file_table + esi + 8]
     add eax, ecx
+    jo near .sys_seek_range
     jmp near .seek_check
 
 .seek_end:
     add eax, ecx
+    jo near .sys_seek_range
 
 .seek_check:
-    cmp eax, 0
-    jge near .seek_ok
-    xor eax, eax
+    test eax, eax
+    js near .sys_seek_range
+    cmp eax, FS_MAX_FILE_SIZE
+    ja near .sys_seek_range
 
 .seek_ok:
     mov [file_table + esi + 8], eax
     jmp near .sys_seek_exit
 
-.sys_seek_err:
-    mov eax, -1
+.sys_seek_bad_fd:
+    mov eax, SYS_ERR_BAD_FD
+    jmp near .sys_seek_exit
+.sys_seek_invalid:
+    mov eax, SYS_ERR_INVALID
+    jmp near .sys_seek_exit
+.sys_seek_io:
+    mov eax, SYS_ERR_IO
+    jmp near .sys_seek_exit
+.sys_seek_range:
+    mov eax, SYS_ERR_RANGE
 
 .sys_seek_exit:
+    pop edi
     pop esi
     pop edx
     pop ecx
     pop ebx
-    iret
+    jmp .syscall_return
 
 .sys_move_cursor:
     push ebx
@@ -784,13 +906,13 @@ syscall_entry:
     pop ecx
     pop ebx
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 .sys_clear_screen:
     mov byte [cursor_auto_sync], 1
     call vga_clear
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 .sys_set_cursor_nosync:
     push ebx
@@ -808,7 +930,7 @@ syscall_entry:
     pop ecx
     pop ebx
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 .sys_save_screen:
     push esi
@@ -826,7 +948,7 @@ syscall_entry:
     pop edi
     pop esi
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 .sys_restore_screen:
     push esi
@@ -846,7 +968,7 @@ syscall_entry:
     pop edi
     pop esi
     xor eax, eax
-    iret
+    jmp .syscall_return
 
 saved_cursor_row dd 0
 saved_cursor_col dd 0
@@ -855,10 +977,15 @@ saved_vga_buffer times 4000 db 0
 tmp_read_cnt dd 0
 current_brk dd 0x00050000
 tmp_fd_slot dd 0
+tmp_open_flags dd 0
 tmp_open_inode dd 0
 tmp_fd_idx dd 0
+tmp_rw_buffer dd 0
+tmp_rw_request dd 0
 tmp_rw_count dd 0
 tmp_rw_done dd 0
 tmp_sector_lba dd 0
 tmp_target_block dd 0
+tmp_wf_chain_block dd 0
+tmp_wf_chain_next dd 0
 file_table times 256 db 0

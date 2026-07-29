@@ -27,6 +27,10 @@ KBD_DATA_PORT       equ 0x60
 %include "OS_src/kernel/fs/layout.def"
 %undef FS_LAYOUT_CONST
 
+%define SYSCALL_CONST(name, value) name equ value
+%include "transport/lib/syscall.def"
+%undef SYSCALL_CONST
+
 FS_OK                equ 0
 FS_ERR_NOT_FOUND     equ -1
 FS_ERR_EXISTS        equ -2
@@ -43,6 +47,7 @@ FS_ERR_PATH_TOO_LONG equ -11
 FS_MAX_PATH          equ 127
 FS_MAX_DEPTH         equ 32
 FS_FAT_EOC           equ 0xFFFF
+FS_MAX_FILE_SIZE     equ FS_DATA_BLOCK_COUNT * 512
 
 INODE_SIZE          equ 64
 INODE_NAME_LEN      equ 27

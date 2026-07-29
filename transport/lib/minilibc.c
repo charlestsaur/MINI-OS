@@ -1,11 +1,16 @@
 #include "minilibc.h"
 #include <stdarg.h>
+#include <limits.h>
+
+#define SYSCALL_CONST(name, value) enum { name = value };
+#include "syscall.def"
+#undef SYSCALL_CONST
 
 void exit(int status) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(1), "b"(status)
+        : "a"(SYS_NR_EXIT), "b"(status)
         : "memory"
     );
 }
@@ -15,7 +20,7 @@ int write(int fd, const char *buf, unsigned int count) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(ret)
-        : "a"(4), "b"(fd), "c"(buf), "d"(count)
+        : "a"(SYS_NR_WRITE), "b"(fd), "c"(buf), "d"(count)
         : "memory"
     );
     return ret;
@@ -26,7 +31,7 @@ int read(int fd, char *buf, unsigned int count) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(ret)
-        : "a"(3), "b"(fd), "c"(buf), "d"(count)
+        : "a"(SYS_NR_READ), "b"(fd), "c"(buf), "d"(count)
         : "memory"
     );
     return ret;
@@ -37,7 +42,7 @@ int getchar(void) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(key)
-        : "a"(7)
+        : "a"(SYS_NR_GETKEY)
         : "memory"
     );
     return key;
@@ -46,7 +51,7 @@ int getchar(void) {
 
 int putchar(int c) {
     char ch = (char)c;
-    write(1, &ch, 1);
+    if (write(1, &ch, 1) != 1) return EOF;
     return (unsigned char)c;
 }
 
@@ -54,7 +59,7 @@ void move_cursor(int row, int col) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(20), "b"(row), "c"(col)
+        : "a"(SYS_NR_MOVE_CURSOR), "b"(row), "c"(col)
         : "memory"
     );
 }
@@ -63,7 +68,7 @@ void set_cursor(int row, int col) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(22), "b"(row), "c"(col)
+        : "a"(SYS_NR_SET_CURSOR), "b"(row), "c"(col)
         : "memory"
     );
 }
@@ -72,7 +77,7 @@ void clear_screen(void) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(21)
+        : "a"(SYS_NR_CLEAR_SCREEN)
         : "memory"
     );
 }
@@ -81,7 +86,7 @@ void save_screen(void) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(23)
+        : "a"(SYS_NR_SAVE_SCREEN)
         : "memory"
     );
 }
@@ -90,7 +95,7 @@ void restore_screen(void) {
     __asm__ __volatile__ (
         "int $0x80"
         :
-        : "a"(24)
+        : "a"(SYS_NR_RESTORE_SCREEN)
         : "memory"
     );
 }
@@ -105,10 +110,10 @@ char *fgets(char *s, int size, void *stream) {
     if (!s || size <= 1) return 0;
 
     if (stream == 0 || stream == stdin) {
-        if (read(0, s, size - 1) >= 0) {
-            return s;
-        }
-        return 0;
+        int count = read(0, s, (unsigned int)(size - 1));
+        if (count < 0) return 0;
+        s[count] = '\0';
+        return s;
     }
 
     while (i < size - 1) {
@@ -304,191 +309,213 @@ int tolower(int c) { return isupper(c) ? c + 32 : c; }
 
 
 int puts(const char *str) {
-    int len = strlen(str);
-    write(1, str, len);
-    write(1, "\n", 1);
+    int len;
+    if (!str) return EOF;
+    len = (int)strlen(str);
+    if (write(1, str, (unsigned int)len) != len) return EOF;
+    if (write(1, "\n", 1) != 1) return EOF;
     return len + 1;
 }
 
-static void itoa_dec(int val, char *buf) {
-    char tmp[16];
-    int i = 0, j = 0;
-    unsigned int uval;
+typedef int (*format_emit_fn)(void *context, char value);
 
-    if (val < 0) {
-        buf[j++] = '-';
-        uval = (unsigned int)(-val);
-    } else {
-        uval = (unsigned int)val;
-    }
+struct format_buffer {
+    char *destination;
+    size_t capacity;
+    size_t position;
+};
 
-    if (uval == 0) {
-        buf[j++] = '0';
-        buf[j] = '\0';
-        return;
-    }
-
-    while (uval > 0) {
-        tmp[i++] = '0' + (uval % 10);
-        uval /= 10;
-    }
-
-    while (i > 0) {
-        buf[j++] = tmp[--i];
-    }
-    buf[j] = '\0';
+static int emit_console(void *context, char value) {
+    (void)context;
+    return write(1, &value, 1) == 1 ? 0 : -1;
 }
 
-static void itoa_hex(unsigned int val, char *buf) {
-    char tmp[16];
-    int i = 0, j = 0;
-    const char *hexchars = "0123456789abcdef";
-
-    if (val == 0) {
-        buf[j++] = '0';
-        buf[j] = '\0';
-        return;
+static int emit_buffer(void *context, char value) {
+    struct format_buffer *buffer = (struct format_buffer *)context;
+    if (buffer->capacity > 0 && buffer->position < buffer->capacity - 1) {
+        buffer->destination[buffer->position] = value;
     }
+    buffer->position++;
+    return 0;
+}
 
-    while (val > 0) {
-        tmp[i++] = hexchars[val % 16];
-        val /= 16;
-    }
+static int format_emit_char(format_emit_fn emit, void *context, char value,
+                            int *count) {
+    if (*count == INT_MAX || emit(context, value) < 0) return -1;
+    (*count)++;
+    return 0;
+}
 
-    while (i > 0) {
-        buf[j++] = tmp[--i];
+static int format_emit_text(format_emit_fn emit, void *context,
+                            const char *text, int *count) {
+    while (*text) {
+        if (format_emit_char(emit, context, *text++, count) < 0) return -1;
     }
-    buf[j] = '\0';
+    return 0;
+}
+
+static int format_emit_unsigned(format_emit_fn emit, void *context,
+                                unsigned long value, unsigned int base,
+                                int *count) {
+    char digits[32];
+    int used = 0;
+    const char *alphabet = "0123456789abcdef";
+
+    do {
+        digits[used++] = alphabet[value % base];
+        value /= base;
+    } while (value != 0);
+
+    while (used > 0) {
+        if (format_emit_char(emit, context, digits[--used], count) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static unsigned long signed_magnitude(long value) {
+    if (value < 0) return 0UL - (unsigned long)value;
+    return (unsigned long)value;
+}
+
+static int format_core(format_emit_fn emit, void *context, const char *fmt,
+                       va_list args) {
+    int count = 0;
+
+    if (!fmt) return -1;
+    while (*fmt) {
+        int long_argument = 0;
+        char conversion;
+
+        if (*fmt != '%') {
+            if (format_emit_char(emit, context, *fmt++, &count) < 0) return -1;
+            continue;
+        }
+
+        fmt++;
+        if (*fmt == '\0') {
+            if (format_emit_char(emit, context, '%', &count) < 0) return -1;
+            break;
+        }
+        if (*fmt == 'l') {
+            long_argument = 1;
+            fmt++;
+        }
+        conversion = *fmt++;
+
+        if (conversion == 'c') {
+            if (format_emit_char(emit, context,
+                                 (char)va_arg(args, int), &count) < 0) {
+                return -1;
+            }
+        } else if (conversion == 's') {
+            const char *text = va_arg(args, const char *);
+            if (!text) text = "(null)";
+            if (format_emit_text(emit, context, text, &count) < 0) return -1;
+        } else if (conversion == 'd' || conversion == 'i') {
+            long value = long_argument ? va_arg(args, long)
+                                       : (long)va_arg(args, int);
+            if (value < 0 &&
+                format_emit_char(emit, context, '-', &count) < 0) {
+                return -1;
+            }
+            if (format_emit_unsigned(emit, context, signed_magnitude(value),
+                                     10, &count) < 0) {
+                return -1;
+            }
+        } else if (conversion == 'u') {
+            unsigned long value = long_argument
+                                      ? va_arg(args, unsigned long)
+                                      : (unsigned long)va_arg(args, unsigned int);
+            if (format_emit_unsigned(emit, context, value, 10, &count) < 0) {
+                return -1;
+            }
+        } else if (conversion == 'x') {
+            unsigned long value = long_argument
+                                      ? va_arg(args, unsigned long)
+                                      : (unsigned long)va_arg(args, unsigned int);
+            if (format_emit_unsigned(emit, context, value, 16, &count) < 0) {
+                return -1;
+            }
+        } else if (conversion == 'p') {
+            unsigned long value = (unsigned long)va_arg(args, void *);
+            if (format_emit_unsigned(emit, context, value, 16, &count) < 0) {
+                return -1;
+            }
+        } else if (conversion == '%') {
+            if (format_emit_char(emit, context, '%', &count) < 0) return -1;
+        } else {
+            if (format_emit_char(emit, context, '%', &count) < 0) return -1;
+            if (long_argument &&
+                format_emit_char(emit, context, 'l', &count) < 0) {
+                return -1;
+            }
+            if (format_emit_char(emit, context, conversion, &count) < 0) {
+                return -1;
+            }
+        }
+    }
+    return count;
+}
+
+static void terminate_format_buffer(struct format_buffer *buffer) {
+    size_t terminator;
+    if (buffer->capacity == 0) return;
+    terminator = buffer->position;
+    if (terminator >= buffer->capacity) terminator = buffer->capacity - 1;
+    buffer->destination[terminator] = '\0';
 }
 
 int printf(const char *fmt, ...) {
     va_list args;
-    const char *p;
-    char numbuf[32];
-
+    int result;
     va_start(args, fmt);
-
-    for (p = fmt; *p != '\0'; p++) {
-        if (*p != '%') {
-            write(1, p, 1);
-            continue;
-        }
-
-        p++; // Skip '%'
-        switch (*p) {
-            case 'c': {
-                char c = (char)va_arg(args, int);
-                write(1, &c, 1);
-                break;
-            }
-            case 's': {
-                char *s = va_arg(args, char *);
-                if (!s) s = "(null)";
-                write(1, s, strlen(s));
-                break;
-            }
-            case 'd': {
-                int d = va_arg(args, int);
-                itoa_dec(d, numbuf);
-                write(1, numbuf, strlen(numbuf));
-                break;
-            }
-            case 'x': {
-                unsigned int x = va_arg(args, unsigned int);
-                itoa_hex(x, numbuf);
-                write(1, numbuf, strlen(numbuf));
-                break;
-            }
-            case '%': {
-                write(1, "%", 1);
-                break;
-            }
-            default:
-                write(1, "%", 1);
-                write(1, p, 1);
-                break;
-        }
-    }
-
+    result = format_core(emit_console, 0, fmt, args);
     va_end(args);
-    return 0;
+    return result;
 }
 
 int vsprintf(char *str, const char *fmt, va_list args) {
-    const char *p;
-    char *out = str;
-    char numbuf[32];
-
-    for (p = fmt; *p != '\0'; p++) {
-        if (*p != '%') {
-            *out++ = *p;
-            continue;
-        }
-
-        p++;
-        switch (*p) {
-            case 'c': {
-                char c = (char)va_arg(args, int);
-                *out++ = c;
-                break;
-            }
-            case 's': {
-                char *s = va_arg(args, char *);
-                if (!s) s = "(null)";
-                while (*s) *out++ = *s++;
-                break;
-            }
-            case 'd':
-            case 'i': {
-                int val = va_arg(args, int);
-                itoa_dec(val, numbuf);
-                {
-                    char *n = numbuf;
-                    while (*n) *out++ = *n++;
-                }
-                break;
-            }
-            case 'x':
-            case 'p': {
-                unsigned int val = va_arg(args, unsigned int);
-                itoa_hex(val, numbuf);
-                {
-                    char *n = numbuf;
-                    while (*n) *out++ = *n++;
-                }
-                break;
-            }
-            case '%': {
-                *out++ = '%';
-                break;
-            }
-            default:
-                *out++ = '%';
-                *out++ = *p;
-                break;
-        }
-    }
-    *out = '\0';
-    return (out - str);
+    struct format_buffer buffer;
+    int result;
+    if (!str) return -1;
+    buffer.destination = str;
+    buffer.capacity = (size_t)-1;
+    buffer.position = 0;
+    result = format_core(emit_buffer, &buffer, fmt, args);
+    terminate_format_buffer(&buffer);
+    return result;
 }
 
 int sprintf(char *str, const char *fmt, ...) {
     va_list args;
-    int ret;
+    int result;
     va_start(args, fmt);
-    ret = vsprintf(str, fmt, args);
+    result = vsprintf(str, fmt, args);
     va_end(args);
-    return ret;
+    return result;
+}
+
+int vsnprintf(char *str, size_t size, const char *fmt, va_list args) {
+    struct format_buffer buffer;
+    int result;
+    if (size > 0 && !str) return -1;
+    buffer.destination = str;
+    buffer.capacity = size;
+    buffer.position = 0;
+    result = format_core(emit_buffer, &buffer, fmt, args);
+    terminate_format_buffer(&buffer);
+    return result;
 }
 
 int snprintf(char *str, size_t size, const char *fmt, ...) {
     va_list args;
-    int ret;
-    (void)size;
+    int result;
     va_start(args, fmt);
-    ret = vsprintf(str, fmt, args);
+    result = vsnprintf(str, size, fmt, args);
     va_end(args);
-    return ret;
+    return result;
 }
 
 /* ========================================================================= */
@@ -497,25 +524,40 @@ int snprintf(char *str, size_t size, const char *fmt, ...) {
 
 static void *sbrk(int increment) {
     void *old_brk;
-    void *new_brk;
+    void *actual_brk;
+    unsigned long old_address;
+    unsigned long new_address;
+    unsigned long magnitude;
 
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(old_brk)
-        : "a"(12), "b"(0)
+        : "a"(SYS_NR_BRK), "b"(0)
         : "memory"
     );
 
     if (increment == 0) return old_brk;
 
-    new_brk = (void *)((char *)old_brk + increment);
+    old_address = (unsigned long)old_brk;
+    if (increment > 0) {
+        if (old_address > ULONG_MAX - (unsigned int)increment) {
+            return (void *)-1;
+        }
+        new_address = old_address + (unsigned int)increment;
+    } else {
+        magnitude = 0UL - (unsigned long)increment;
+        if (old_address < magnitude) return (void *)-1;
+        new_address = old_address - magnitude;
+    }
+
     __asm__ __volatile__ (
         "int $0x80"
-        :
-        : "a"(12), "b"(new_brk)
+        : "=a"(actual_brk)
+        : "a"(SYS_NR_BRK), "b"((void *)new_address)
         : "memory"
     );
 
+    if ((unsigned long)actual_brk != new_address) return (void *)-1;
     return old_brk;
 }
 
@@ -567,6 +609,7 @@ static Header *morecore(unsigned int nu) {
     Header *up;
 
     if (nu < 1024) nu = 1024;
+    if (nu > (unsigned int)INT_MAX / sizeof(Header)) return 0;
     cp = (char *)sbrk(nu * sizeof(Header));
     if (cp == (char *)-1 || !cp) return 0;
 
@@ -581,10 +624,12 @@ void *malloc(size_t nbytes) {
     unsigned int nunits;
 
     if (nbytes == 0) return 0;
+    if (nbytes > (size_t)UINT_MAX - (sizeof(Header) - 1)) return 0;
     nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
+    if (nunits == 0) return 0;
 
     if ((prevp = freep) == 0) {
-        base.s.ptr = freep = &base;
+        base.s.ptr = freep = prevp = &base;
         base.s.size = 0;
     }
 
@@ -609,7 +654,9 @@ void *malloc(size_t nbytes) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
-    size_t total = nmemb * size;
+    size_t total;
+    if (size != 0 && nmemb > (size_t)UINT_MAX / size) return 0;
+    total = nmemb * size;
     void *p = malloc(total);
     if (p) memset(p, 0, total);
     return p;
@@ -688,8 +735,15 @@ unsigned long strtoul(const char *nptr, char **endptr, int base) {
     return (unsigned long)strtol(nptr, endptr, base);
 }
 
-int abs(int j) { return j < 0 ? -j : j; }
-long labs(long j) { return j < 0 ? -j : j; }
+int abs(int j) {
+    if (j >= 0) return j;
+    return (int)(0U - (unsigned int)j);
+}
+
+long labs(long j) {
+    if (j >= 0) return j;
+    return (long)(0UL - (unsigned long)j);
+}
 
 static unsigned long next_rand = 1;
 int rand(void) {
@@ -702,16 +756,20 @@ void srand(unsigned int seed) {
 
 void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *)) {
     char *b = (char *)base;
-    size_t i, j;
-    char tmp[256];
+    size_t i, j, byte_index;
 
-    if (nmemb < 2) return;
+    if (!base || !compar || nmemb < 2 || size == 0) return;
+    if (nmemb > (size_t)UINT_MAX / size) return;
     for (i = 0; i < nmemb - 1; i++) {
         for (j = 0; j < nmemb - 1 - i; j++) {
             if (compar(b + j * size, b + (j + 1) * size) > 0) {
-                memcpy(tmp, b + j * size, size);
-                memcpy(b + j * size, b + (j + 1) * size, size);
-                memcpy(b + (j + 1) * size, tmp, size);
+                char *left = b + j * size;
+                char *right = left + size;
+                for (byte_index = 0; byte_index < size; byte_index++) {
+                    char temporary = left[byte_index];
+                    left[byte_index] = right[byte_index];
+                    right[byte_index] = temporary;
+                }
             }
         }
     }
@@ -741,25 +799,48 @@ struct FILE {
     int error;
 };
 
+static int parse_fopen_mode(const char *mode, int *flags_out) {
+    int flags;
+    int plus_seen = 0;
+    int binary_seen = 0;
+    const char *cursor;
+
+    if (!mode || !mode[0]) return -1;
+    if (mode[0] == 'r') {
+        flags = SYS_OPEN_READ;
+    } else if (mode[0] == 'w') {
+        flags = SYS_OPEN_WRITE | SYS_OPEN_CREATE | SYS_OPEN_TRUNCATE;
+    } else if (mode[0] == 'a') {
+        flags = SYS_OPEN_WRITE | SYS_OPEN_CREATE | SYS_OPEN_APPEND;
+    } else {
+        return -1;
+    }
+
+    for (cursor = mode + 1; *cursor; cursor++) {
+        if (*cursor == '+' && !plus_seen) {
+            flags |= SYS_OPEN_READ | SYS_OPEN_WRITE;
+            plus_seen = 1;
+        } else if (*cursor == 'b' && !binary_seen) {
+            binary_seen = 1;
+        } else {
+            return -1;
+        }
+    }
+    *flags_out = flags;
+    return 0;
+}
+
 FILE *fopen(const char *filename, const char *mode) {
-    int flags = 0;
+    int flags;
     int fd;
     FILE *f;
 
-    if (!filename || !mode) return NULL;
-
-    if (mode[0] == 'r') {
-        flags = 1;
-    } else if (mode[0] == 'w' || mode[0] == 'a') {
-        flags = 2;
-    } else {
-        return NULL;
-    }
+    if (!filename || parse_fopen_mode(mode, &flags) < 0) return NULL;
 
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(fd)
-        : "a"(5), "b"(filename), "d"(flags)
+        : "a"(SYS_NR_OPEN), "b"(filename), "c"(flags)
         : "memory"
     );
 
@@ -770,7 +851,7 @@ FILE *fopen(const char *filename, const char *mode) {
         __asm__ __volatile__ (
             "int $0x80"
             :
-            : "a"(6), "b"(fd)
+            : "a"(SYS_NR_CLOSE), "b"(fd)
             : "memory"
         );
         return NULL;
@@ -780,10 +861,6 @@ FILE *fopen(const char *filename, const char *mode) {
     f->flags = flags;
     f->eof = 0;
     f->error = 0;
-
-    if (mode[0] == 'a') {
-        fseek(f, 0, SEEK_END);
-    }
 
     return f;
 }
@@ -795,7 +872,7 @@ int fclose(FILE *stream) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(ret)
-        : "a"(6), "b"(stream->fd)
+        : "a"(SYS_NR_CLOSE), "b"(stream->fd)
         : "memory"
     );
 
@@ -808,19 +885,32 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     int bytes_read;
 
     if (!ptr || size == 0 || nmemb == 0 || !stream) return 0;
+    if (nmemb > (size_t)UINT_MAX / size) {
+        if (stream) stream->error = 1;
+        return 0;
+    }
     total_bytes = size * nmemb;
+    if (total_bytes > (size_t)INT_MAX) {
+        stream->error = 1;
+        return 0;
+    }
 
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(bytes_read)
-        : "a"(14), "b"(stream->fd), "c"(ptr), "d"(total_bytes)
+        : "a"(SYS_NR_READ_FILE), "b"(stream->fd), "c"(ptr), "d"(total_bytes)
         : "memory"
     );
 
-    if (bytes_read <= 0) {
+    if (bytes_read < 0) {
+        stream->error = 1;
+        return 0;
+    }
+    if (bytes_read == 0) {
         stream->eof = 1;
         return 0;
     }
+    if ((size_t)bytes_read < total_bytes) stream->eof = 1;
 
     return (size_t)(bytes_read / size);
 }
@@ -830,19 +920,28 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     int bytes_written;
 
     if (!ptr || size == 0 || nmemb == 0 || !stream) return 0;
+    if (nmemb > (size_t)UINT_MAX / size) {
+        if (stream) stream->error = 1;
+        return 0;
+    }
     total_bytes = size * nmemb;
+    if (total_bytes > (size_t)INT_MAX) {
+        stream->error = 1;
+        return 0;
+    }
 
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(bytes_written)
-        : "a"(15), "b"(stream->fd), "c"(ptr), "d"(total_bytes)
+        : "a"(SYS_NR_WRITE_FILE), "b"(stream->fd), "c"(ptr), "d"(total_bytes)
         : "memory"
     );
 
-    if (bytes_written <= 0) {
+    if (bytes_written < 0) {
         stream->error = 1;
         return 0;
     }
+    if ((size_t)bytes_written < total_bytes) stream->error = 1;
 
     return (size_t)(bytes_written / size);
 }
@@ -854,11 +953,15 @@ int fseek(FILE *stream, long offset, int whence) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(ret)
-        : "a"(19), "b"(stream->fd), "c"(offset), "d"(whence)
+        : "a"(SYS_NR_LSEEK), "b"(stream->fd), "c"(offset), "d"(whence)
         : "memory"
     );
 
-    if (ret >= 0) stream->eof = 0;
+    if (ret >= 0) {
+        stream->eof = 0;
+    } else {
+        stream->error = 1;
+    }
     return (ret >= 0) ? 0 : -1;
 }
 
@@ -869,10 +972,11 @@ long ftell(FILE *stream) {
     __asm__ __volatile__ (
         "int $0x80"
         : "=a"(pos)
-        : "a"(19), "b"(stream->fd), "c"(0), "d"(1)
+        : "a"(SYS_NR_LSEEK), "b"(stream->fd), "c"(0), "d"(SEEK_CUR)
         : "memory"
     );
 
+    if (pos < 0) stream->error = 1;
     return pos;
 }
 
@@ -881,6 +985,7 @@ void rewind(FILE *stream) {
 }
 
 int fflush(FILE *stream) {
+    /* MINI-OS streams are unbuffered; there is no userspace buffer to flush. */
     (void)stream;
     return 0;
 }

@@ -1,60 +1,119 @@
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
+
+static int failures = 0;
+
+static void check(int condition, const char *name) {
+    if (!condition) {
+        printf("FAIL: %s\n", name);
+        failures++;
+    }
+}
+
+static int call_unknown_syscall(void) {
+    int result;
+    __asm__ __volatile__ (
+        "int $0x80"
+        : "=a"(result)
+        : "a"(0x7fffffff)
+        : "memory"
+    );
+    return result;
+}
 
 int main(void) {
     FILE *fp;
-    char read_buf[128];
-    const char *test_msg = "Hello, MINI-OS File I/O System! C90 disk streams work!\n";
-    size_t written, read_cnt;
-    long pos;
+    char buffer[16];
+    size_t count;
 
-    puts("==========================================");
-    puts("   MINI-OS Phase 4 File Stream I/O Test");
-    puts("==========================================");
-
-    /* 1. Open file for writing (creates file on disk) */
-    fp = fopen("output.txt", "w");
-    if (!fp) {
-        puts("ERROR: Failed to fopen('output.txt', 'w')!");
-        return 1;
+    fp = fopen("syslib.txt", "w");
+    check(fp != NULL, "open w");
+    if (fp != NULL) {
+        check(fwrite("base", 1, 4, fp) == 4, "write base");
+        check(ftell(fp) == 4, "write position");
+        check(fread(buffer, 1, 1, fp) == 0, "write-only read rejected");
+        check(ferror(fp) != 0 && feof(fp) == 0, "read error is not EOF");
+        fclose(fp);
     }
-    puts("1. fopen('output.txt', 'w') successful.");
 
-    /* 2. Write text to file */
-    written = fwrite(test_msg, 1, strlen(test_msg), fp);
-    printf("2. fwrite wrote %u bytes.\n", (unsigned int)written);
-
-    /* 3. Query current file position using ftell */
-    pos = ftell(fp);
-    printf("3. ftell position after write: %ld bytes.\n", pos);
-
-    /* 4. Close file */
-    fclose(fp);
-    puts("4. fclose completed.");
-
-    /* 5. Reopen file for reading */
-    fp = fopen("output.txt", "r");
-    if (!fp) {
-        puts("ERROR: Failed to fopen('output.txt', 'r')!");
-        return 1;
+    fp = fopen("syslib.txt", "r");
+    check(fp != NULL, "open r");
+    if (fp != NULL) {
+        check(fwrite("+", 1, 1, fp) == 0, "read-only write rejected");
+        check(ferror(fp) != 0 && feof(fp) == 0, "write error is not EOF");
+        fclose(fp);
     }
-    puts("5. fopen('output.txt', 'r') successful.");
 
-    /* 6. Read text back from file */
-    memset(read_buf, 0, sizeof(read_buf));
-    read_cnt = fread(read_buf, 1, sizeof(read_buf) - 1, fp);
-    printf("6. fread read %u bytes back from disk:\n", (unsigned int)read_cnt);
-    printf("   Content: '%s'\n", read_buf);
+    fp = fopen("syslib.txt", "a");
+    check(fp != NULL, "open a");
+    if (fp != NULL) {
+        check(fwrite("+", 1, 1, fp) == 1, "append write");
+        fclose(fp);
+    }
 
-    /* 7. Test fseek back to start */
-    fseek(fp, 0, SEEK_SET);
-    pos = ftell(fp);
-    printf("7. fseek(0, SEEK_SET) position: %ld\n", pos);
+    fp = fopen("syslib.txt", "r+");
+    check(fp != NULL, "open r+");
+    if (fp != NULL) {
+        memset(buffer, 0, sizeof(buffer));
+        count = fread(buffer, 1, sizeof(buffer), fp);
+        check(count == 5 && memcmp(buffer, "base+", 5) == 0,
+              "append preserved contents");
+        check(feof(fp) != 0 && ferror(fp) == 0, "short read sets only EOF");
+        check(fseek(fp, 0, SEEK_SET) == 0 && feof(fp) == 0,
+              "seek clears EOF");
+        check(fseek(fp, -1, SEEK_SET) < 0, "negative seek rejected");
+        check(fseek(fp, LONG_MAX, SEEK_END) < 0,
+              "overflowing seek rejected");
+        fclose(fp);
+    }
 
-    /* 8. Close file */
-    fclose(fp);
-    puts("8. fclose completed.");
+    fp = fopen("syslib.txt", "w+");
+    check(fp != NULL, "open w+");
+    if (fp != NULL) {
+        check(fwrite("A", 1, 1, fp) == 1, "write after truncate");
+        check(fseek(fp, 3, SEEK_SET) == 0, "seek beyond EOF");
+        check(fwrite("B", 1, 1, fp) == 1, "write after gap");
+        check(fseek(fp, 0, SEEK_SET) == 0, "rewind gap file");
+        memset(buffer, 0x7f, sizeof(buffer));
+        count = fread(buffer, 1, 4, fp);
+        check(count == 4 && buffer[0] == 'A' && buffer[1] == 0 &&
+              buffer[2] == 0 && buffer[3] == 'B', "gap bytes are zero");
+        fclose(fp);
+    }
 
-    puts("\nPhase 4 File Stream I/O tests PASSED cleanly!");
-    return 0;
+    fp = fopen("syslib.txt", "a+");
+    check(fp != NULL, "open a+");
+    if (fp != NULL) {
+        check(fseek(fp, 0, SEEK_SET) == 0, "append stream seek");
+        check(fwrite("C", 1, 1, fp) == 1, "append ignores write position");
+        check(fseek(fp, 0, SEEK_SET) == 0, "append stream rewind");
+        memset(buffer, 0, sizeof(buffer));
+        count = fread(buffer, 1, 5, fp);
+        check(count == 5 && buffer[4] == 'C', "append landed at EOF");
+        check(fwrite(buffer, 2, UINT_MAX, fp) == 0,
+              "fwrite multiplication overflow");
+        check(ferror(fp) != 0, "overflow sets stream error");
+        fclose(fp);
+    }
+
+    fp = fopen("syslib.txt", "r");
+    check(fp != NULL, "open for fread overflow");
+    if (fp != NULL) {
+        check(fread(buffer, 2, UINT_MAX, fp) == 0,
+              "fread multiplication overflow");
+        check(ferror(fp) != 0, "fread overflow sets stream error");
+        fclose(fp);
+    }
+
+    check(fopen("syslib.txt", "bad") == NULL, "invalid mode rejected");
+    check(write(1, "", 0) == 0, "console write count");
+    check(call_unknown_syscall() == -1, "unknown syscall rejected");
+
+    if (failures == 0) {
+        puts("SYSCALL/STREAM TESTS PASSED");
+        return 0;
+    }
+    printf("SYSCALL/STREAM FAILURES: %d\n", failures);
+    return 1;
 }

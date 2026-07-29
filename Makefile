@@ -2,7 +2,7 @@ BUILD_DIR := build
 SRC_DIR := OS_src
 BOOT_SRC := $(SRC_DIR)/boot/boot.asm
 KERNEL_SRC := $(SRC_DIR)/kernel/main.asm
-KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \))
+KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \)) transport/lib/syscall.def
 FS_LAYOUT_DEF := $(SRC_DIR)/kernel/fs/layout.def
 
 BOOT_BIN := $(BUILD_DIR)/boot.bin
@@ -52,7 +52,7 @@ $(ELF2BIN_TOOL): tools/elf2bin.c | $(BUILD_DIR)
 $(CRT0_OBJ): $(CRT0_SRC) | $(BUILD_DIR)
 	$(NASM) -f elf32 $(CRT0_SRC) -o $(CRT0_OBJ)
 
-$(MINILIBC_OBJ): $(MINILIBC_SRC) | $(BUILD_DIR)
+$(MINILIBC_OBJ): $(MINILIBC_SRC) $(LIB_DIR)/minilibc.h $(LIB_DIR)/syscall.def $(LIB_DIR)/limits.h | $(BUILD_DIR)
 	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=gnu11 -I$(LIB_DIR) -c $(MINILIBC_SRC) -o $(MINILIBC_OBJ)
 
 # Generic rule to compile any C app or library test under transport/

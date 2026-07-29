@@ -80,6 +80,7 @@ int ispunct(int c);
 int isxdigit(int c);
 int iscntrl(int c);
 int toupper(int c);
+int tolower(int c);
 
 /* <stdlib.h> Functions */
 void *malloc(size_t size);
@@ -89,6 +90,8 @@ void *realloc(void *ptr, size_t size);
 int atoi(const char *nptr);
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
+/* INT_MIN/LONG_MIN are returned unchanged because their positive magnitude
+ * is not representable in the corresponding signed return type. */
 int abs(int j);
 long labs(long j);
 int rand(void);
