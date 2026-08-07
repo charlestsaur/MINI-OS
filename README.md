@@ -25,7 +25,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - ATA PIO disk I/O (`LBA28`, sector read/write)
 - Custom filesystem with persistent directory tree
 - IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
-- Executable loader (`run <file>`) for multi-sector flat binaries at `0x00040000`
+- FAT-chain executable loader (`run <file>`) for flat binaries up to 64 KiB at `0x00040000`
 - C90 application runtime with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
 - ANSI C90 standard headers (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`)
 - Host-side disk transport tool (`tools/inject_transport.c`) for inject `/transport/` files
@@ -80,7 +80,7 @@ cat note.txt
 mv note.txt note2.txt
 ls
 
-cd /transport/build
+cd /transport/build/apps
 ls
 run hello.bin
 run calc.bin

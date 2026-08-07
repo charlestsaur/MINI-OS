@@ -4,7 +4,18 @@ This guide explains how to write, compile, and execute C90 applications for **MI
 
 ## 1. Overview
 
-MINI-OS supports executing user-space C applications written in **ANSI C (C90 standard)**. User binaries are loaded by the kernel Shell into physical memory address `0x00040000` with stack space allocated at `0x0008F000`. System calls are routed to the kernel through the `int 0x80` interrupt gate.
+MINI-OS supports executing trusted C applications written in **ANSI C (C90)**.
+Application source under `transport/apps/` is compiled with strict C90
+diagnostics (`-std=c90 -pedantic-errors -Wall -Wextra -Werror`). The runtime
+implementation under `transport/lib/` intentionally uses modern C and is built
+separately. Flat application binaries are loaded into the 64 KiB region at
+`0x00040000`, with the stack starting at `0x0008F000`. System calls use the
+`int 0x80` interrupt gate.
+
+Applications are not isolated processes. They execute in Ring 0 in the same
+flat address space as the kernel, so only trusted binaries should be run. An
+application can access kernel memory and privileged instructions, and its fault
+can stop the entire system.
 
 ## 2. C90 Programming Guidelines for MINI-OS
 
@@ -92,11 +103,11 @@ int main(void) {
 MINI-OS uses an automated build toolchain:
 
 ```plaintext
-[ transport/apps/*.c ] ──> Clang (-std=c90 -mno-sse) ──> [ build/*.o ]
+[ transport/apps/*.c ] ──> Clang (strict C90, -mno-sse) ──> [ build/*.o ]
                                                               │
 [ crt0.o + minilibc.o ] ─────────────────────────> [ ld.lld / elf2bin ]
                                                               │
-[ transport/build/*.bin ] ──> [ inject_transport ] ──> [ /external/ in mini_os.img ]
+[ transport/build/apps/*.bin ] ──> [ inject_transport ] ──> [ /transport/ in mini_os.img ]
 ```
 
 1. **C Runtime Startup (`crt0.asm`)**:
@@ -107,7 +118,8 @@ MINI-OS uses an automated build toolchain:
 2. **Host Transport Injector (`tools/inject_transport.c`)**:
    - Built automatically during `make`.
    - Parses the MINI-OS disk image format.
-   - Injects compiled binaries from `transport/build/*.bin` into the `/external/` directory on `mini_os.img`.
+   - Injects the `transport/` tree, including `transport/build/apps/*.bin`, at
+     `/transport/` in `mini_os.img`.
 
 ## 5. Building and Running User Applications
 
@@ -136,16 +148,16 @@ make run
 
 ### Step 3: Execute User Binaries in MINI-OS Shell
 
-1. Navigate to the compiled binaries directory `/transport/build`:
+1. Navigate to the compiled binaries directory `/transport/build/apps`:
 
    ```text
-   / > cd /transport/build
+   / > cd /transport/build/apps
    ```
 
 2. List compiled binaries:
 
    ```text
-   /transport/build > ls
+   /transport/build/apps > ls
    entries:
     - calc.bin (f)
     - guess.bin (f)
@@ -156,13 +168,13 @@ make run
 3. Run an application:
 
    ```text
-   /transport/build > run calc.bin
+   /transport/build/apps > run calc.bin
    ```
 
 ### Expected Output in MINI-OS Console
 
 ```text
-transport/build > run calc.bin
+/transport/build/apps > run calc.bin
 MINI_OS: launching app...
 ==========================================
    MINI-OS Interactive C90 Calculator
@@ -176,7 +188,7 @@ Result: 1 + 1 = 2
 calc>
 Calculator exiting...
 MINI_OS: app exited cleanly.
-/transport/build >
+/transport/build/apps >
 ```
 
 ## 6. Execution Flow & Architecture Breakdown
@@ -189,7 +201,8 @@ sequenceDiagram
     participant IDT as Syscall Handler (int 0x80)
 
     Shell->>Loader: Command "run hello.bin"
-    Loader->>Loader: Read sectors into 0x00040000
+    Loader->>Loader: Validate size and complete FAT chain
+    Loader->>Loader: Clear 64 KiB image and follow FAT blocks into 0x00040000
     Loader->>Loader: Save Shell ESP -> [saved_kernel_esp]
     Loader->>Loader: Set ESP = 0x0008F000
     Loader->>App: Jump to 0x00040000 (_start -> main)
@@ -202,6 +215,14 @@ sequenceDiagram
 ## 7. Memory Boundaries & Limitations
 
 - **Executable Base**: `0x00040000`
+- **Executable End (exclusive)**: `0x00050000`
+- **Maximum Flat Binary Size**: 64 KiB, including code and initialized static data
+- **Heap**: `0x00050000` through `0x00080000`
+- **Argument Strings / `argv`**: `0x0008E000` through the pointer table at `0x0008E100`
 - **Application Stack**: `0x0008F000` (grows downwards)
-- **Maximum Application Size**: ~320 KB (code + static data + stack)
 - **System Call Integers**: `sys_exit` = 1, `sys_write` = 4
+
+The loader clears the full executable region before each run so zero-initialized
+static storage starts at zero. The flat-binary format has no relocation or
+segment metadata; code and initialized static data must fit below the heap
+boundary.

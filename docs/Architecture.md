@@ -24,11 +24,15 @@
   - `EAX=3` (`sys_read`): reads keyboard input with character echo, backspace handling, and newline detection into buffer.
   - `EAX=4` (`sys_write`): outputs text buffer to VGA console.
   - `EAX=12` (`sys_brk`): expands process heap break address between `0x00050000` and `0x00080000` for dynamic memory allocation (`malloc`/`free`).
+  - `EAX=25`: returns the VGA cursor position as `row * 80 + column`, used by
+    application render verification.
 
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
 - Dispatches operations to filesystem wrappers and executable loader (`run`).
-- Implements `shell_run`: loads multi-sector binary to `0x00040000`, switches stack to `0x0008F000`, and executes.
+- Implements `shell_run`: validates and follows an executable FAT chain, loads
+  a maximum 64 KiB image at `0x00040000`, switches the stack to `0x0008F000`,
+  and executes it.
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
@@ -47,7 +51,8 @@
 - Shared low-level primitives: zero/copy/string/compare helpers.
 
 - File: `tools/inject_transport.c`
-- Host-side C tool that parses MINI-OS filesystem structures and injects host `transport/` files into `/external/` during `make`.
+- Host-side C tool that parses MINI-OS filesystem structures and injects the
+  host `transport/` tree at `/transport/` during `make`.
 
 ## Data Model
 
@@ -56,8 +61,8 @@
 - Type: `0=free`, `1=file`, `2=directory`
 - Name: fixed-size field (`27` bytes)
 - Size: file byte count
-- Start block: first LBA in data area
-- Blocks count: contiguous data blocks occupied
+- Start block: first FAT data-block index
+- Blocks count: exact number of blocks in the FAT chain
 - Parent: parent inode index
 
 ### Directory Entry
@@ -81,12 +86,21 @@ Directory entries are stored in data blocks referenced by directory inodes.
 
 1. Resolve file Inode via path lookup.
 2. Verify target is a regular file (`type == 1`).
-3. Read `start_block` and `blocks_cnt`.
-4. Loop-read sectors into physical memory `0x00040000 + i * 512`.
-5. Save Shell stack pointer in `[saved_kernel_esp]`.
-6. Set stack pointer `esp = 0x0008F000`.
-7. `call 0x00040000`.
-8. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores `[saved_kernel_esp]` and jumps to `return_to_shell`.
+3. Require a nonzero byte size no greater than 64 KiB and an exact
+   `ceil(size / 512)` block count.
+4. Validate the complete FAT chain, including range, cycle, and final-EOC
+   checks, before changing the application image.
+5. Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each
+   data block into `0x00040000 + i * 512`.
+6. Copy bounded argument strings and build `argv` at `0x0008E000`.
+7. Save Shell stack pointer in `[saved_kernel_esp]`.
+8. Set stack pointer `esp = 0x0008F000` and `call 0x00040000`.
+9. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores
+   `[saved_kernel_esp]` and jumps to `return_to_shell`.
+
+Applications are trusted Ring 0 code in the kernel's flat address space. The
+syscall ABI organizes application access to kernel services, but it does not
+provide privilege or memory isolation.
 
 ### Path Resolution
 
@@ -117,8 +131,10 @@ The kernel uses explicit physical memory regions for buffers and execution:
 - `0x00024000`: `BUF_INODE`
 - `0x00025000`: `BUF_CMD`
 - `0x00026000`: `IDT_BASE` (2048-byte IDT table)
-- `0x00040000`: User Program Base Address (`run` load target)
-- `0x0008F000`: User Application Stack Pointer (grows downwards)
+- `0x00040000..0x0004FFFF`: Application image (64 KiB maximum)
+- `0x00050000..0x0007FFFF`: Application heap
+- `0x0008E000..0x0008E10B`: Argument strings and `argv` pointers
+- `0x0008F000`: Application Stack Pointer (grows downwards)
 - `0x00090000`: Kernel Stack Pointer (grows downwards)
 
 This avoids dynamic memory management and keeps flows explicit.

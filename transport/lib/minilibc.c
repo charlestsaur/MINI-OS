@@ -100,6 +100,17 @@ void restore_screen(void) {
     );
 }
 
+int get_cursor_position(void) {
+    int position;
+    __asm__ __volatile__ (
+        "int $0x80"
+        : "=a"(position)
+        : "a"(SYS_NR_GET_CURSOR)
+        : "memory"
+    );
+    return position;
+}
+
 
 
 char *fgets(char *s, int size, void *stream) {

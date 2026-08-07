@@ -78,6 +78,8 @@ syscall_entry:
     je near .sys_save_screen
     cmp eax, SYS_NR_RESTORE_SCREEN
     je near .sys_restore_screen
+    cmp eax, SYS_NR_GET_CURSOR
+    je near .sys_get_cursor
 
     mov eax, SYS_ERR_INVALID
     jmp .syscall_return
@@ -968,6 +970,12 @@ syscall_entry:
     pop edi
     pop esi
     xor eax, eax
+    jmp .syscall_return
+
+.sys_get_cursor:
+    mov eax, [cursor_row]
+    imul eax, VGA_WIDTH
+    add eax, [cursor_col]
     jmp .syscall_return
 
 saved_cursor_row dd 0

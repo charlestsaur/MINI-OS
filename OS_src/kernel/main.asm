@@ -49,6 +49,17 @@ FS_MAX_DEPTH         equ 32
 FS_FAT_EOC           equ 0xFFFF
 FS_MAX_FILE_SIZE     equ FS_DATA_BLOCK_COUNT * 512
 
+APP_IMAGE_BASE       equ 0x00040000
+APP_IMAGE_END        equ 0x00050000
+APP_IMAGE_SIZE       equ APP_IMAGE_END - APP_IMAGE_BASE
+APP_IMAGE_MAX_BLOCKS equ APP_IMAGE_SIZE / 512
+APP_ARG0_ADDR        equ 0x0008E000
+APP_ARG0_CAP         equ 0x50
+APP_ARG1_ADDR        equ 0x0008E050
+APP_ARG1_CAP         equ 0xB0
+APP_ARGV_ADDR        equ 0x0008E100
+APP_STACK_TOP        equ 0x0008F000
+
 INODE_SIZE          equ 64
 INODE_NAME_LEN      equ 27
 INODE_TYPE_OFF      equ 0
@@ -107,6 +118,20 @@ tmp_alloc_block     dd 0
 tmp_old_entry_idx   dd 0
 tmp_new_entry_idx   dd 0
 tmp_cwd_affected    db 0
+tmp_cat_block       dd 0
+tmp_cat_remaining   dd 0
+tmp_cat_blocks      dd 0
+tmp_edit_length     dd 0
+tmp_edit_old_blocks dd 0
+tmp_edit_tail       dd 0
+tmp_edit_error      dd 0
+tmp_edit_detached   db 0
+tmp_edit_allocated  db 0
+tmp_run_path        dd 0
+tmp_run_arg         dd 0
+tmp_run_block       dd 0
+tmp_run_blocks      dd 0
+tmp_run_index       dd 0
 saved_kernel_esp    dd 0
 
 kernel_start:
@@ -201,6 +226,9 @@ msg_edit_prompt    db "Editor mode: Enter=new line, ESC=save and exit.", 10, 0
 msg_edit_ok        db "Saved.", 10, 0
 msg_app_start      db "MINI_OS: launching app...", 10, 0
 msg_app_finished   db "MINI_OS: app exited cleanly.", 10, 0
+msg_run_too_large  db "Executable exceeds the 64 KiB application image region.", 10, 0
+msg_run_bad_image  db "Executable metadata or FAT chain is invalid.", 10, 0
+msg_run_arg_long   db "Executable path or argument is too long.", 10, 0
 
 cmd_help           db "help", 0
 cmd_ls             db "ls", 0

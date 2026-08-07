@@ -14,7 +14,7 @@ This file documents current limitations only.
 
 ## Filesystem And Storage
 
-- Contiguous allocation model per inode.
+- FAT-chain allocation; files may be fragmented across the data region.
 - No journaling and no crash recovery.
 - No standalone fsck/repair command.
 - No file permissions model.

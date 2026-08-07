@@ -72,7 +72,8 @@ Creates an empty file at the target path.
 
 Prints file content.
 
-Current practical behavior is single-sector content read path.
+The command validates and follows the complete FAT chain, printing only the
+bytes covered by the inode size.
 
 ### `edit <file>`
 
@@ -83,6 +84,9 @@ Enters text input mode for a file.
 - `ESC` saves and exits
 
 If file does not exist, the shell tries to create it first.
+
+This small editor accepts at most 510 bytes. Saving truncates an existing file
+to one data block and releases every former tail block.
 
 ### `rm <path>`
 
@@ -104,9 +108,14 @@ Renames or moves entry.
 Loads and executes a raw binary application from disk.
 
 - resolves target file Inode and verifies regular file type (`INODE_TYPE == 1`)
-- reads all occupied sectors contiguously into physical memory `0x00040000`
+- validates that the byte size, block count, and complete FAT chain agree
+- follows the FAT chain and loads at most 64 KiB into `0x00040000..0x0004FFFF`
+- clears the complete 64 KiB image region before loading, including space used
+  by the flat binary's zero-initialized data
+- rejects an executable path longer than 79 bytes and a second token longer
+  than 175 bytes
 - saves kernel Shell stack pointer in `[saved_kernel_esp]`
-- sets user stack pointer `esp = 0x0008F000`
+- sets application stack pointer `esp = 0x0008F000`
 - jumps to `0x00040000`
 - user application executes and invokes system calls via `int 0x80` (`sys_exit`, `sys_write`)
 - upon `sys_exit` (`int 0x80`, `eax=1`), kernel restores `[saved_kernel_esp]` and cleanly returns to Shell prompt
@@ -120,7 +129,7 @@ Reformats filesystem and resets cwd to root.
 Example session 1 (Executing C90 application):
 
 ```text
-cd /transport/build
+cd /transport/build/apps
 ls
 run hello.bin
 
@@ -140,15 +149,40 @@ ls
 
 ## 5. Input Notes
 
+The command grammar is exactly:
+
+```text
+command [argument1 [argument2]]
+```
+
+Spaces separate tokens. Quoting and escaping are not implemented, names cannot
+contain spaces, and tokens after `argument2` are ignored. Consequently `run`
+supports an executable path and at most one application argument.
+
+The full-screen `vedit` application holds 21 rows of 77 characters and does not
+scroll. It rejects a file outside that format instead of silently splitting or
+discarding its content, and blocks saving that rejected file from the incomplete
+editor buffer. Capacity, load, and save messages remain visible on its
+control row until the next key press. Run `vedit test` to check row
+padding and final cursor placement.
+
 Keyboard input is polling-based and uses a limited scancode map.
 
 This may not match all host keyboard layouts.
+
+## 6. Application Trust Model
+
+Loaded applications are trusted kernel-level code. They execute in the same
+Ring 0 address space as the kernel, with no paging, memory protection, or fault
+isolation. They can access kernel memory and privileged instructions, and an
+application fault can stop the whole system. The `int 0x80` interface is an ABI
+boundary, not a security boundary.
 
 Implementation:
 
 - `OS_src/kernel/drivers.asm`
 
-## 6. User-Facing Error Messages
+## 7. User-Facing Error Messages
 
 Shell handlers map internal error codes to text messages, such as:
 

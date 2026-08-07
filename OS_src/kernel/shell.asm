@@ -429,21 +429,60 @@ shell_cat:
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
     jne .not_file
 
-    mov ecx, [BUF_INODE + INODE_SIZE_OFF]
-    cmp ecx, 0
+    mov eax, [BUF_INODE + INODE_SIZE_OFF]
+    cmp eax, 0
     je .empty
+    cmp eax, FS_MAX_FILE_SIZE
+    ja .corrupt
+    mov [tmp_cat_remaining], eax
 
-    cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
-    je .empty
+    add eax, 511
+    jc .corrupt
+    shr eax, 9
+    cmp eax, [BUF_INODE + INODE_BLOCKS_OFF]
+    jne .corrupt
+    mov [tmp_cat_blocks], eax
 
     mov eax, [BUF_INODE + INODE_START_OFF]
+    mov [tmp_cat_block], eax
+    mov ecx, [tmp_cat_blocks]
+    mov ebx, ecx
+    dec ebx
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl .fs_error
+
+.stream:
+    mov eax, [tmp_cat_block]
     add eax, FS_DATA_START_LBA
     mov edi, BUF_TEXT
     call ata_read_sector_lba28
     jc .io
 
+    mov ecx, [tmp_cat_remaining]
+    cmp ecx, 512
+    jbe .print
+    mov ecx, 512
+.print:
+    sub [tmp_cat_remaining], ecx
     mov esi, BUF_TEXT
     call vga_print_n
+
+    dec dword [tmp_cat_blocks]
+    cmp dword [tmp_cat_blocks], 0
+    je .stream_done
+    mov eax, [tmp_cat_block]
+    call fs_fat_read_entry
+    cmp eax, FS_OK
+    jl .fs_error
+    cmp eax, FS_FAT_EOC
+    je .corrupt
+    mov [tmp_cat_block], eax
+    jmp .stream
+
+.stream_done:
+    cmp dword [tmp_cat_remaining], 0
+    jne .corrupt
     call vga_newline
     pop esi
     ret
@@ -462,6 +501,9 @@ shell_cat:
 
 .io:
     mov eax, FS_ERR_IO
+    jmp .fs_error
+.corrupt:
+    mov eax, FS_ERR_CORRUPT
 .fs_error:
     call shell_print_fs_error
     pop esi
@@ -503,15 +545,48 @@ shell_edit:
     mov edi, BUF_TEXT
     mov ecx, 510
     call kbd_read_text
-    mov [tmp_data_lba], eax
+    mov [tmp_edit_length], eax
+    mov byte [tmp_edit_detached], 0
+    mov byte [tmp_edit_allocated], 0
+    mov dword [tmp_edit_tail], FS_FAT_EOC
 
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
-    jne .have_block
+    jne .validate_chain
 
     call fs_fat_alloc_block
     cmp eax, FS_OK
     jl .lookup_fail
     mov [BUF_INODE + INODE_START_OFF], eax
+    mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
+    mov byte [tmp_edit_allocated], 1
+    jmp .have_block
+
+.validate_chain:
+    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
+    mov [tmp_edit_old_blocks], ecx
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, ecx
+    dec ebx
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl .lookup_fail
+
+    cmp dword [tmp_edit_old_blocks], 1
+    je .have_block
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    call fs_fat_read_entry
+    cmp eax, FS_OK
+    jl .lookup_fail
+    cmp eax, FS_FAT_EOC
+    je .corrupt
+    mov [tmp_edit_tail], eax
+
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, FS_FAT_EOC
+    call fs_fat_write_entry
+    cmp eax, FS_OK
+    jl .lookup_fail
+    mov byte [tmp_edit_detached], 1
     mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
 
 .have_block:
@@ -527,7 +602,7 @@ shell_edit:
 
     mov esi, BUF_TEXT
     mov edi, BUF_SECTOR
-    mov ecx, [tmp_data_lba]
+    mov ecx, [tmp_edit_length]
     inc ecx
     call copy_bytes
 
@@ -535,17 +610,30 @@ shell_edit:
     add eax, FS_DATA_START_LBA
     mov esi, BUF_SECTOR
     call ata_write_sector_lba28
-    jc .io_fail
+    jc .write_io_fail
 
-    mov eax, [tmp_data_lba]
+    mov eax, [tmp_edit_length]
     mov [BUF_INODE + INODE_SIZE_OFF], eax
+    mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
 
     mov eax, [tmp_inode_idx]
     mov esi, BUF_INODE
     call fs_write_inode
     cmp eax, FS_OK
+    jl .rollback_fail
+
+    mov byte [tmp_edit_allocated], 0
+    cmp byte [tmp_edit_detached], 0
+    je .saved
+    mov byte [tmp_edit_detached], 0
+    mov eax, [tmp_edit_tail]
+    mov ecx, [tmp_edit_old_blocks]
+    dec ecx
+    call fs_fat_free_chain
+    cmp eax, FS_OK
     jl .lookup_fail
 
+.saved:
     mov esi, msg_edit_ok
     call vga_print
     pop esi
@@ -562,20 +650,33 @@ shell_edit:
     pop esi
     ret
 
-.no_data:
-    mov esi, msg_no_data
-    call vga_print
-    pop esi
-    ret
-
 .bad_block:
-    mov esi, msg_not_file
-    call vga_print
-    pop esi
-    ret
+    mov eax, FS_ERR_CORRUPT
+    jmp .rollback_fail
 
-.io_fail:
+.write_io_fail:
     mov eax, FS_ERR_IO
+.rollback_fail:
+    mov [tmp_edit_error], eax
+    cmp byte [tmp_edit_detached], 0
+    je .rollback_allocated
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ebx, [tmp_edit_tail]
+    call fs_fat_write_entry
+    mov byte [tmp_edit_detached], 0
+.rollback_allocated:
+    cmp byte [tmp_edit_allocated], 0
+    je .rollback_done
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov ecx, 1
+    call fs_fat_free_chain
+    mov byte [tmp_edit_allocated], 0
+.rollback_done:
+    mov eax, [tmp_edit_error]
+    jmp .lookup_fail
+
+.corrupt:
+    mov eax, FS_ERR_CORRUPT
 .lookup_fail:
     call shell_print_fs_error
     pop esi
@@ -588,6 +689,23 @@ shell_edit:
 shell_run:
     push esi
     push edi
+
+    mov [tmp_run_path], esi
+    mov [tmp_run_arg], edi
+
+    mov ecx, APP_ARG0_CAP
+    call string_fits_capacity
+    test eax, eax
+    jz near shell_run_arg_too_long
+    mov esi, [tmp_run_arg]
+    test esi, esi
+    jz .args_valid
+    mov ecx, APP_ARG1_CAP
+    call string_fits_capacity
+    test eax, eax
+    jz near shell_run_arg_too_long
+.args_valid:
+    mov esi, [tmp_run_path]
 
     call fs_lookup_path
     cmp eax, FS_OK
@@ -602,68 +720,92 @@ shell_run:
     cmp byte [BUF_INODE + INODE_TYPE_OFF], 1
     jne near shell_run_not_file
 
-    mov eax, [BUF_INODE + INODE_START_OFF]
-    mov ecx, [BUF_INODE + INODE_BLOCKS_OFF]
-    cmp ecx, 0
+    mov eax, [BUF_INODE + INODE_SIZE_OFF]
+    cmp eax, 0
     je near shell_run_empty
+    cmp eax, APP_IMAGE_SIZE
+    ja near shell_run_too_large
 
-    mov [tmp_data_lba], eax       ; Start LBA
-    mov [tmp_child_inode], ecx    ; Sector count
-    xor ebx, ebx                  ; Sector index i = 0
+    add eax, 511
+    jc near shell_run_too_large
+    shr eax, 9
+    cmp eax, [BUF_INODE + INODE_BLOCKS_OFF]
+    jne near shell_run_bad_image
+    cmp eax, APP_IMAGE_MAX_BLOCKS
+    ja near shell_run_too_large
+    mov [tmp_run_blocks], eax
+
+    mov eax, [BUF_INODE + INODE_START_OFF]
+    mov [tmp_run_block], eax
+    mov ecx, [tmp_run_blocks]
+    mov ebx, ecx
+    dec ebx
+    call fs_fat_get_nth_block
+    cmp eax, FS_OK
+    jl near shell_run_fs_error
+
+    mov edi, APP_IMAGE_BASE
+    mov ecx, APP_IMAGE_SIZE
+    call zero_buffer
+    mov dword [tmp_run_index], 0
 
 shell_run_load_loop:
-    cmp ebx, [tmp_child_inode]
+    mov ebx, [tmp_run_index]
+    cmp ebx, [tmp_run_blocks]
     jge near shell_run_load_done
 
-    mov eax, [tmp_data_lba]
-    add eax, ebx
+    mov eax, [tmp_run_block]
+    add eax, FS_DATA_START_LBA
 
     mov edi, ebx
     shl edi, 9
-    add edi, 0x00040000          ; Dest = 0x00040000 + i * 512
+    add edi, APP_IMAGE_BASE
 
-    push ebx
     call ata_read_sector_lba28
-    pop ebx
+    jc near shell_run_io_error
 
-    inc ebx
+    inc dword [tmp_run_index]
+    mov ebx, [tmp_run_index]
+    cmp ebx, [tmp_run_blocks]
+    jge near shell_run_load_done
+
+    mov eax, [tmp_run_block]
+    call fs_fat_read_entry
+    cmp eax, FS_OK
+    jl near shell_run_fs_error
+    cmp eax, FS_FAT_EOC
+    je near shell_run_bad_image
+    mov [tmp_run_block], eax
     jmp near shell_run_load_loop
 
 shell_run_load_done:
     pop edi                       ; tok_arg2
     pop esi                       ; tok_arg1
 
-    ; Copy argv[0] string ("vedit.bin") to 0x0008E000
-    push esi
-    push edi
-    mov edi, 0x0008E000
-    call copy_str_until_zero
-    pop edi
-    pop esi
+    ; The capacities were validated before loading the executable.
+    mov edi, APP_ARG0_ADDR
+    call copy_string
 
     ; Check tok_arg2
+    mov edi, [tmp_run_arg]
     test edi, edi
     jz near .shell_run_argc1
 
     ; Copy argv[1] string ("001.txt") to 0x0008E050
-    push esi
-    push edi
     mov esi, edi
-    mov edi, 0x0008E050
-    call copy_str_until_zero
-    pop edi
-    pop esi
+    mov edi, APP_ARG1_ADDR
+    call copy_string
 
     ; Build argv array at 0x0008E100
-    mov dword [0x0008E100], 0x0008E000
-    mov dword [0x0008E104], 0x0008E050
-    mov dword [0x0008E108], 0
+    mov dword [APP_ARGV_ADDR], APP_ARG0_ADDR
+    mov dword [APP_ARGV_ADDR + 4], APP_ARG1_ADDR
+    mov dword [APP_ARGV_ADDR + 8], 0
     mov ecx, 2                    ; argc = 2
     jmp near .shell_run_setup_stack
 
 .shell_run_argc1:
-    mov dword [0x0008E100], 0x0008E000
-    mov dword [0x0008E104], 0
+    mov dword [APP_ARGV_ADDR], APP_ARG0_ADDR
+    mov dword [APP_ARGV_ADDR + 4], 0
     mov ecx, 1                    ; argc = 1
 
 .shell_run_setup_stack:
@@ -674,15 +816,15 @@ shell_run_load_done:
     mov [saved_kernel_esp], esp
 
     ; Setup user stack at 0x0008F000
-    mov esp, 0x0008F000
+    mov esp, APP_STACK_TOP
 
-    ; Push ABI args onto user stack: [esp+0]=ret, [esp+4]=argc, [esp+8]=argv
-    push dword 0x0008E100        ; argv pointer array
+    ; Push arguments. The following call supplies [esp+0]=return address,
+    ; leaving [esp+4]=argc and [esp+8]=argv as expected by crt0.
+    push dword APP_ARGV_ADDR     ; argv pointer array
     push ecx                     ; argc
-    push dword 0                 ; dummy return address
 
-    ; Jump to app at 0x00040000
-    mov eax, 0x00040000
+    ; Call app at 0x00040000
+    mov eax, APP_IMAGE_BASE
     call eax
 
 return_to_shell:
@@ -691,35 +833,60 @@ return_to_shell:
     call vga_print
     ret
 
-copy_str_until_zero:
-    mov al, [esi]
-    mov [edi], al
+; IN: ESI=string, ECX=destination capacity including the terminator
+; OUT: EAX=1 if the terminator is within capacity, otherwise 0
+string_fits_capacity:
+    push ecx
+    push esi
+.check:
+    test ecx, ecx
+    jz .no
+    cmp byte [esi], 0
+    je .yes
     inc esi
-    inc edi
-    test al, al
-    jnz copy_str_until_zero
+    dec ecx
+    jmp .check
+.yes:
+    mov eax, 1
+    jmp .done
+.no:
+    xor eax, eax
+.done:
+    pop esi
+    pop ecx
     ret
 
 shell_run_empty:
     mov esi, msg_empty
     call vga_print
-    pop esi
-    ret
+    jmp shell_run_cleanup
 
 shell_run_not_file:
     mov esi, msg_not_file
     call vga_print
-    pop esi
-    ret
+    jmp shell_run_cleanup
 
-shell_run_not_found:
-    mov esi, msg_not_found
+shell_run_too_large:
+    mov esi, msg_run_too_large
     call vga_print
-    pop esi
-    ret
+    jmp shell_run_cleanup
+
+shell_run_bad_image:
+    mov esi, msg_run_bad_image
+    call vga_print
+    jmp shell_run_cleanup
+
+shell_run_arg_too_long:
+    mov esi, msg_run_arg_long
+    call vga_print
+    jmp shell_run_cleanup
+
+shell_run_io_error:
+    mov eax, FS_ERR_IO
 
 shell_run_fs_error:
     call shell_print_fs_error
+shell_run_cleanup:
     pop edi
     pop esi
     ret

@@ -36,6 +36,7 @@ void set_cursor(int row, int col);
 void clear_screen(void);
 void save_screen(void);
 void restore_screen(void);
+int get_cursor_position(void);
 
 /* File Stream I/O Functions */
 FILE *fopen(const char *filename, const char *mode);

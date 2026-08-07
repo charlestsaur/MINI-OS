@@ -59,7 +59,7 @@ $(MINILIBC_OBJ): $(MINILIBC_SRC) $(LIB_DIR)/minilibc.h $(LIB_DIR)/syscall.def $(
 $(APP_BUILD_DIR)/%.bin: transport/%.c $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) | $(BUILD_DIR) $(APP_BUILD_DIR)
 	@echo "Compiling C binary '$<'..."
 	@mkdir -p $(dir $@)
-	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=c90 -I$(LIB_DIR) -c $< -o $(BUILD_DIR)/$(notdir $*).o
+	$(CLANG) -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -std=c90 -pedantic-errors -Wall -Wextra -Werror -I$(LIB_DIR) -c $< -o $(BUILD_DIR)/$(notdir $*).o
 	@if command -v $(LLD) >/dev/null 2>&1; then \
 		echo "Linking '$@' using Solution A (ld.lld)..."; \
 		$(LLD) -m elf_i386 --image-base 0x40000 -Ttext 0x40000 --oformat binary $(CRT0_OBJ) $(BUILD_DIR)/$(notdir $*).o $(MINILIBC_OBJ) -o $@; \
