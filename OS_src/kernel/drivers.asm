@@ -11,6 +11,8 @@ ata_read_sector_lba28:
     push edi
 
     mov ebx, eax
+    cmp ebx, 0x0FFFFFFF
+    ja .fail
     call ata_wait_not_busy
     jc .fail
 
@@ -47,6 +49,8 @@ ata_read_sector_lba28:
     mov dx, ATA_DATA_PORT
     mov ecx, 256
     rep insw
+    call ata_wait_not_busy
+    jc .fail
     clc
     jmp .done
 
@@ -70,6 +74,8 @@ ata_write_sector_lba28:
     push esi
 
     mov ebx, eax
+    cmp ebx, 0x0FFFFFFF
+    ja .fail
     call ata_wait_not_busy
     jc .fail
 
@@ -805,9 +811,19 @@ vga_backspace:
 
     mov ebx, [cursor_col]
     cmp ebx, 0
-    je .done
+    jne .move_left
 
+    mov eax, [cursor_row]
+    cmp eax, 0
+    je .done
+    dec eax
+    mov [cursor_row], eax
+    mov ebx, VGA_WIDTH - 1
+    jmp .erase
+
+.move_left:
     dec ebx
+.erase:
     mov [cursor_col], ebx
 
     mov eax, [cursor_row]
@@ -816,7 +832,7 @@ vga_backspace:
     shl eax, 1
     mov edi, VGA_BUFFER
     add edi, eax
-    mov word [edi], 0x0720
+    mov word [edi], (VGA_ATTR << 8) | ' '
 
 .done:
     call vga_sync_cursor

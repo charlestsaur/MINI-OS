@@ -25,8 +25,9 @@ This file documents current limitations only.
 ## Device And Driver Layer
 
 - ATA PIO path is polling-based.
-- Disk I/O helpers do not expose rich hardware error codes to shell-level logic.
-- Keyboard input is polling-based with a limited scancode mapping.
+- Protected-mode storage supports only an LBA28 disk exposed as the primary ATA channel's master device; the BIOS boot-drive number is not yet mapped to a kernel storage device.
+- Disk I/O reports success/failure after bounded waits and `ERR`/`DF` checks, but does not expose richer controller diagnostics to shell-level logic.
+- Keyboard input is polling-based and uses a limited Set 1 US-layout mapping; there is no Caps Lock, alternate layout, or asynchronous input state.
 
 ## Robustness And Validation
 
@@ -43,4 +44,5 @@ This file documents current limitations only.
 ## Summary
 
 The system is functional for its current personal-project scope, but reliability and fault tolerance remain limited.
+
 Using it as an experimental environment is reasonable; using it as a trusted storage system is not.

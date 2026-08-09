@@ -155,28 +155,29 @@ The command grammar is exactly:
 command [argument1 [argument2]]
 ```
 
-Spaces separate tokens. Quoting and escaping are not implemented, names cannot
-contain spaces, and tokens after `argument2` are ignored. Consequently `run`
-supports an executable path and at most one application argument.
+Spaces separate tokens. Quoting and escaping are not implemented, names cannot contain spaces, and tokens after `argument2` are ignored.
 
-The full-screen `vedit` application holds 21 rows of 77 characters and does not
-scroll. It rejects a file outside that format instead of silently splitting or
-discarding its content, and blocks saving that rejected file from the incomplete
-editor buffer. Capacity, load, and save messages remain visible on its
-control row until the next key press. Run `vedit test` to check row
-padding and final cursor placement.
+Consequently `run` supports an executable path and at most one application argument.
 
-Keyboard input is polling-based and uses a limited scancode map.
+The full-screen `vedit` application holds 21 rows of 77 characters and does not scroll.
 
-This may not match all host keyboard layouts.
+It rejects a file outside that format instead of silently splitting or discarding its content, and blocks saving that rejected file from the incomplete editor buffer.
+
+Capacity, load, and save messages remain visible on its control row until the next key press. Run `vedit test` to check row padding and final cursor placement.
+
+Keyboard input polls IBM PC/AT Set 1 scan codes and maps them as a US keyboard.
+
+Supported input consists of letters, the number row and its shifted symbols, common US punctuation, Space, Enter, Escape, Backspace/Delete, arrow keys, both Shift keys, and Ctrl+C/Ctrl+S/Ctrl+Q.
+
+Caps Lock, Alt combinations, function keys, the numeric keypad, layout selection, and asynchronous input are not implemented.
+
+Unsupported keys are ignored. A host layout other than US may therefore produce characters different from its printed key labels.
 
 ## 6. Application Trust Model
 
-Loaded applications are trusted kernel-level code. They execute in the same
-Ring 0 address space as the kernel, with no paging, memory protection, or fault
-isolation. They can access kernel memory and privileged instructions, and an
-application fault can stop the whole system. The `int 0x80` interface is an ABI
-boundary, not a security boundary.
+Loaded applications are trusted kernel-level code. They execute in the same Ring 0 address space as the kernel, with no paging, memory protection, or fault isolation.
+
+They can access kernel memory and privileged instructions, and an application fault can stop the whole system. The `int 0x80` interface is an ABI boundary, not a security boundary.
 
 Implementation:
 

@@ -26,6 +26,7 @@ Before testing on physical hardware, ensure all of the following:
 2. Secure Boot is disabled.
 3. USB drive is selected in legacy boot menu.
 4. The image is written to the whole USB device, not to a partition.
+5. After boot, firmware/chipset compatibility exposes that same medium as the primary legacy ATA/IDE master (`0x1F0..0x1F7`). BIOS loading alone does not guarantee this protected-mode mapping.
 
 ## 3. Build and Prepare Image
 
@@ -121,11 +122,12 @@ On successful boot you should see text similar to:
 
 If you only see a blinking cursor, use the troubleshooting section below.
 
-With the current rewritten bootloader, you may also briefly see single diagnostic characters:
+If kernel loading fails after all EDD and CHS attempts, the bootloader prints
+`F` and halts.
 
-- `E`: loader is using INT 13h extensions (EDD/LBA path)
-- `C`: loader fell back to CHS path
-- `F`: kernel loading failed and bootloader halted
+The loader probes EDD and retries one sector at a time. If EDD is unavailable or repeatedly fails, it restarts the complete kernel load through CHS.
+
+A successful BIOS loading stage does not prove that the later ATA driver can address the same device.
 
 ## 7. Troubleshooting: Blinking Cursor Only
 
@@ -135,6 +137,7 @@ With the current rewritten bootloader, you may also briefly see single diagnosti
 2. USB image written to a partition instead of whole disk.
 3. Wrong target disk selected during `dd`.
 4. Firmware silently rejects USB geometry/boot path.
+5. BIOS loaded the USB image, but protected mode does not expose it as primary legacy ATA master; in this case the kernel normally reaches its filesystem fatal message after its ATA readiness timeout.
 
 ### 7.2 Quick diagnosis steps
 
@@ -150,12 +153,12 @@ If needed, add a single character print at the very top of `OS_src/boot/boot.asm
 
 ## 8. Real-Hardware Compatibility Notes (Current Project State)
 
-- Kernel is loaded by BIOS INT 13h extended read from LBA 1.
-- Disk I/O in protected mode uses ATA PIO ports (`0x1F0` range).
-- This is ideal for emulators but may be unreliable on some modern USB boot paths.
+- The boot sector probes INT 13h extensions and otherwise uses a corrected CHS fallback; both paths issue one-sector requests with bounded retries.
+- Disk I/O in protected mode uses only primary-master ATA PIO ports (`0x1F0..0x1F7`) and cannot discover the BIOS boot device.
+- QEMU is launched with the image explicitly attached as IDE index 0. Many real USB boot paths do not preserve an equivalent mapping after protected-mode entry.
 
 ## 9. Current Compatibility Boundary
 
-At the current stage, this image should be treated as BIOS/CSM-oriented.
+At the current stage, this image should be treated as BIOS/CSM-oriented and primary-legacy-ATA-master-oriented.
 
 UEFI-only machines without CSM are outside the present supported path.

@@ -19,10 +19,10 @@ The documentation and some comments were written by Gemini and GPT. A small part
 
 ## Current Features
 
-- BIOS boot sector loader with kernel load to memory
+- BIOS boot loader with EDD probing, per-sector retries, and CHS fallback
 - Protected-mode kernel entry (`[org 0x8000]`)
 - VGA text console and polling keyboard input
-- ATA PIO disk I/O (`LBA28`, sector read/write)
+- checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write)
 - Custom filesystem with persistent directory tree
 - IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 64 KiB at `0x00040000`
@@ -122,6 +122,8 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 > Apart from this, MINI-OS does not perform any destructive operations on the machine. Nevertheless, to prevent potential data loss or hardware damage, it is still recommended to run it on a non-critical machine.
 
 This project currently targets BIOS/CSM-style boot flows.
+
+After BIOS loading, filesystem access requires the boot disk to remain exposed as the primary legacy ATA/IDE master. `make run` configures QEMU accordingly; many firmware USB paths do not provide this mapping.
 
 For USB boot on physical machines, read `docs/Real_Hardware_Guide.md` carefully.
 

@@ -127,7 +127,7 @@ $(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(APP_BINS) $(FS_LAYOUT_DEF)
 	$(INJECT_TOOL) $(OS_IMG) transport
 
 run: $(OS_IMG)
-	$(QEMU) -drive format=raw,file=$(OS_IMG)
+	$(QEMU) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk
 
 clean:
 	rm -rf $(BUILD_DIR) $(APP_BUILD_DIR)

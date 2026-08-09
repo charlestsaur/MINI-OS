@@ -5,17 +5,16 @@ This guide explains how to write, compile, and execute C90 applications for **MI
 ## 1. Overview
 
 MINI-OS supports executing trusted C applications written in **ANSI C (C90)**.
-Application source under `transport/apps/` is compiled with strict C90
-diagnostics (`-std=c90 -pedantic-errors -Wall -Wextra -Werror`). The runtime
-implementation under `transport/lib/` intentionally uses modern C and is built
-separately. Flat application binaries are loaded into the 64 KiB region at
-`0x00040000`, with the stack starting at `0x0008F000`. System calls use the
-`int 0x80` interrupt gate.
 
-Applications are not isolated processes. They execute in Ring 0 in the same
-flat address space as the kernel, so only trusted binaries should be run. An
-application can access kernel memory and privileged instructions, and its fault
-can stop the entire system.
+Application source under `transport/apps/` is compiled with strict C90 diagnostics (`-std=c90 -pedantic-errors -Wall -Wextra -Werror`).
+
+The runtime implementation under `transport/lib/` intentionally uses modern C and is built separately.
+
+Flat application binaries are loaded into the 64 KiB region at `0x00040000`, with the stack starting at `0x0008F000`. System calls use the `int 0x80` interrupt gate.
+
+Applications are not isolated processes. They execute in Ring 0 in the same flat address space as the kernel, so only trusted binaries should be run.
+
+An application can access kernel memory and privileged instructions, and its fault can stop the entire system.
 
 ## 2. C90 Programming Guidelines for MINI-OS
 
@@ -222,16 +221,15 @@ sequenceDiagram
 - **Application Stack**: `0x0008F000` (grows downwards)
 - **System Call Integers**: `sys_exit` = 1, `sys_write` = 4
 
-The loader clears the full executable region before each run so zero-initialized
-static storage starts at zero. The flat-binary producer must preserve section
-placement so every zero-initialized symbol remains inside the 64 KiB application
-image. `ld.lld --oformat binary` may omit trailing zero-only bytes; this is safe
-because the loader clears the entire image. The `elf2bin` fallback explicitly
-materializes `SHT_NOBITS` placement and checks its output capacity. The format
-has no runtime relocation or segment metadata.
+The loader clears the full executable region before each run so zero-initialized static storage starts at zero. The flat-binary producer must preserve section placement so every zero-initialized symbol remains inside the 64 KiB application image.
 
-The executable regression `transport/lib_test/test_bss.c` checks 12 KiB of
-zero-initialized static arrays and their writability. Run it with:
+`ld.lld --oformat binary` may omit trailing zero-only bytes; this is safe because the loader clears the entire image.
+
+The `elf2bin` fallback explicitly materializes `SHT_NOBITS` placement and checks its output capacity.
+
+The format has no runtime relocation or segment metadata.
+
+The executable regression `transport/lib_test/test_bss.c` checks 12 KiB of zero-initialized static arrays and their writability. Run it with:
 
 ```text
 run /transport/build/lib_test/test_bss.bin

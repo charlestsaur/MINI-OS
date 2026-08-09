@@ -5,13 +5,8 @@ This document only describes code/file responsibilities.
 ## 1. Boot Sources
 
 - `OS_src/boot/boot.asm`
-  - standard boot path used by current Makefile
-  - BIOS disk read
+  - EDD detection, bounded one-sector reads, retries, disk resets, and CHS fallback
   - GDT setup and protected-mode jump
-
-- `OS_src/boot/real_machine_boot.asm`
-  - alternative loader with EDD detection and CHS fallback logic
-  - This is the boot prepared for running on real hardware, but it hasn't succeeded yet (it might be a problem with my machine).
 
 ## 2. Kernel Entry and Global Constants
 
@@ -39,9 +34,9 @@ This document only describes code/file responsibilities.
 ## 5. Driver Layer
 
 - `OS_src/kernel/drivers.asm`
-  - ATA PIO read/write helpers (LBA28)
-  - keyboard polling and scan-code translation
-  - VGA text-mode output/cursor helpers
+  - checked primary-master ATA PIO read/write helpers (LBA28)
+  - polling Set 1 / US-layout keyboard translation
+  - VGA text-mode output/cursor helpers, including row-crossing backspace
 
 ## 6. Utility Layer
 
@@ -64,24 +59,18 @@ This document only describes code/file responsibilities.
 ## 8. Host Tools & User Applications
 
 - `tools/inject_transport.c`
-  - checked host C program for deterministic injection of the `transport/` tree
-    at `/transport/`
+  - checked host C program for deterministic injection of the `transport/` tree at `/transport/`
   - validates image geometry and FAT chains and propagates mutation failures
-
 - `tools/elf2bin.c`
   - host C 32-bit ELF linker and flat binary generator
-
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
-
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
-
 - `transport/lib_test/`
   - strict C90 executable tests, including `test_bss.c`
-
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 

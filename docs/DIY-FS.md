@@ -51,19 +51,20 @@ endstruc
 
 ## 3 Critical Low-Level Interface: ATA PIO
 
-In 32-bit protected mode you cannot use BIOS disk services, so disk I/O must go through ATA ports.
+The current protected-mode implementation uses the primary ATA channel's master device directly; it does not discover or translate the BIOS boot-drive number.
 
 Minimal read flow (`LBA28`, one sector):
 
-1. Wait until BSY=0.
-2. Program sector count (`0x1F2` = 1).
-3. Program LBA low/mid/high (`0x1F3..0x1F5`).
-4. Program drive/head (`0x1F6`) with `0xE0 | (lba>>24 & 0x0F)`.
-5. Send command `0x20` to `0x1F7`.
-6. Poll status until DRQ=1.
-7. Read 256 words from `0x1F0` (`rep insw`).
+1. Reject an LBA outside the 28-bit range.
+2. Wait with a fixed iteration limit until BSY=0, failing on timeout, ERR, or DF.
+3. Program sector count (`0x1F2` = 1).
+4. Program LBA low/mid/high (`0x1F3..0x1F5`).
+5. Program drive/head (`0x1F6`) with `0xE0 | (lba>>24 & 0x0F)`.
+6. Send command `0x20` to `0x1F7`.
+7. Poll with the same bounded error checks until DRQ=1.
+8. Read 256 words from `0x1F0` (`rep insw`) and check final completion status.
 
-Write flow is identical, except command `0x30` and data transfer uses `rep outsw`.
+Write flow is identical, except command `0x30`, data transfer uses `rep outsw`, and cache flush completion is also checked. Both helpers return carry clear on success and carry set on any device error or timeout; callers must propagate it.
 
 ## 4 File Editor and File System Interaction
 

@@ -6,7 +6,9 @@
 
 - File: `OS_src/boot/boot.asm`
 - Runs in 16-bit real mode.
-- Loads kernel sectors from disk using BIOS.
+- Probes BIOS EDD support and loads the kernel one sector at a time with three attempts per sector and disk resets between failed attempts.
+- Falls back to BIOS CHS reads when EDD is unavailable or its read path fails.
+- Advances the destination segment by 512 bytes per request, so no BIOS transfer buffer crosses a 64 KiB segment boundary.
 - Initializes temporary execution environment (segments/stack/GDT).
 - Performs protected-mode transition.
 
@@ -30,29 +32,29 @@
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
 - Dispatches operations to filesystem wrappers and executable loader (`run`).
-- Implements `shell_run`: validates and follows an executable FAT chain, loads
-  a maximum 64 KiB image at `0x00040000`, switches the stack to `0x0008F000`,
-  and executes it.
+- Implements `shell_run`: validates and follows an executable FAT chain, loads a maximum 64 KiB image at `0x00040000`, switches the stack to `0x0008F000`, and executes it.
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
 
 - File: `OS_src/kernel/drivers.asm`
-- ATA PIO sector read/write (`LBA28`, sector read/write).
-- Keyboard polling and scan-code translation.
+- ATA PIO sector read/write (`LBA28`, primary-channel master only) with bounded readiness waits and `ERR`/`DF` propagation.
+- Polling IBM PC/AT Set 1 keyboard input using a US-layout mapping.
 - VGA text-mode rendering and cursor control.
 
 ### Layer 3: Storage and Utilities
 
 - File: `OS_src/kernel/fs/*.asm`
-- Implements metadata lifecycle, path handling, directory mutation, and inode/block allocation.
+  
+  Implements metadata lifecycle, path handling, directory mutation, and inode/block allocation.
 
 - File: `OS_src/kernel/utils.asm`
-- Shared low-level primitives: zero/copy/string/compare helpers.
+  
+  Shared low-level primitives: zero/copy/string/compare helpers.
 
 - File: `tools/inject_transport.c`
-- Host-side C tool that parses MINI-OS filesystem structures and injects the
-  host `transport/` tree at `/transport/` during `make`.
+  
+  Host-side C tool that parses MINI-OS filesystem structures and injects the host `transport/` tree at `/transport/` during `make`.
 
 ## Data Model
 
@@ -86,21 +88,17 @@ Directory entries are stored in data blocks referenced by directory inodes.
 
 1. Resolve file Inode via path lookup.
 2. Verify target is a regular file (`type == 1`).
-3. Require a nonzero byte size no greater than 64 KiB and an exact
-   `ceil(size / 512)` block count.
-4. Validate the complete FAT chain, including range, cycle, and final-EOC
-   checks, before changing the application image.
-5. Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each
-   data block into `0x00040000 + i * 512`.
+3. Require a nonzero byte size no greater than 64 KiB and an exact `ceil(size / 512)` block count.
+4. Validate the complete FAT chain, including range, cycle, and final-EOC checks, before changing the application image.
+5. Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each data block into `0x00040000 + i * 512`.
 6. Copy bounded argument strings and build `argv` at `0x0008E000`.
 7. Save Shell stack pointer in `[saved_kernel_esp]`.
 8. Set stack pointer `esp = 0x0008F000` and `call 0x00040000`.
-9. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores
-   `[saved_kernel_esp]` and jumps to `return_to_shell`.
+9. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores `[saved_kernel_esp]` and jumps to `return_to_shell`.
 
-Applications are trusted Ring 0 code in the kernel's flat address space. The
-syscall ABI organizes application access to kernel services, but it does not
-provide privilege or memory isolation.
+Applications are trusted Ring 0 code in the kernel's flat address space.
+
+The syscall ABI organizes application access to kernel services, but it does not provide privilege or memory isolation.
 
 ### Path Resolution
 

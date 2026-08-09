@@ -10,8 +10,13 @@ This flow describes the transition from BIOS to the functional Shell.
 graph TD
     A[Power On / Reset] --> B[BIOS Loads Boot Sector LBA 0 to 0x7C00]
     B --> C[Bootloader: Set 16-bit Segments & Stack]
-    C --> D[Bootloader: Load Kernel via INT 13h AH=42h to 0x8000]
-    D --> E[Bootloader: Define GDT - Null/Code/Data]
+    C --> D{INT 13h EDD Available?}
+    D -- Yes --> D1[Read One LBA Sector at a Time<br/>3 Attempts + Disk Reset]
+    D1 -- EDD Failure --> D2[Restart Load with CHS Reads<br/>3 Attempts per Sector]
+    D -- No --> D2
+    D1 -- Complete --> E[Bootloader: Define GDT - Null/Code/Data]
+    D2 -- Complete --> E
+    D2 -- Failure --> DF[Print F and Halt]
     E --> F[Bootloader: Set CR0.PE & Far Jump to 0x08:init_pm]
     F --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
     G --> H[Kernel: FS Bootstrap]
@@ -27,27 +32,36 @@ graph TD
 
 ## 2. Low-Level Disk I/O (ATA PIO LBA28)
 
-This section details the synchronous hardware handshake in `drivers.asm`. Note the distinct polling loops for BSY and DRQ status bits.
+This section details the synchronous primary-master handshake in `drivers.asm`.
+Every polling loop is bounded and fails immediately on ATA `ERR` or `DF`.
 
 ```mermaid
 flowchart TD
-    Start([Call ATA I/O Routine]) --> WaitBSY1{Status Port 0x1F7:<br/>BSY == 0?}
-    WaitBSY1 -- No (Busy) --> WaitBSY1
+    Start([Call ATA I/O Routine]) --> LBA{Within LBA28 Range?}
+    LBA -- No --> Fail([Return CF Set])
+    LBA -- Yes --> WaitBSY1{ERR/DF Set?<br/>Timed Out?<br/>BSY == 0?}
+    WaitBSY1 -- Error / Timeout --> Fail
+    WaitBSY1 -- Busy --> WaitBSY1
     WaitBSY1 -- Yes (Ready) --> Program[Program Task File Registers:<br/>0x1F2: Sector Count = 1<br/>0x1F3: LBA Low<br/>0x1F4: LBA Mid<br/>0x1F5: LBA High<br/>0x1F6: Drive/Head Select]
     
     Program --> IssueCmd[Write Command to 0x1F7:<br/>Read: 0x20 / Write: 0x30]
     
-    IssueCmd --> WaitDRQ{Status Port 0x1F7:<br/>DRQ == 1?}
-    WaitDRQ -- No (Not Ready) --> WaitDRQ
+    IssueCmd --> WaitDRQ{ERR/DF Set?<br/>Timed Out?<br/>DRQ == 1?}
+    WaitDRQ -- Error / Timeout --> Fail
+    WaitDRQ -- Not Ready --> WaitDRQ
     WaitDRQ -- Yes (Ready) --> OpType{Operation Type?}
     
     OpType -- Read (0x20) --> DataIn[REP INSW:<br/>Read 256 words from 0x1F0]
-    DataIn --> Finish([Return])
+    DataIn --> WaitReadDone{ERR/DF Set?<br/>Timed Out?<br/>BSY == 0?}
+    WaitReadDone -- Error / Timeout --> Fail
+    WaitReadDone -- Busy --> WaitReadDone
+    WaitReadDone -- Complete --> Finish([Return CF Clear])
     
     OpType -- Write (0x30) --> DataOut[REP OUTSW:<br/>Write 256 words to 0x1F0]
     DataOut --> Flush[Issue Cache Flush:<br/>Write 0xE7 to 0x1F7]
-    Flush --> WaitBSY2{Status Port 0x1F7:<br/>BSY == 0?}
-    WaitBSY2 -- No (Pending) --> WaitBSY2
+    Flush --> WaitBSY2{ERR/DF Set?<br/>Timed Out?<br/>BSY == 0?}
+    WaitBSY2 -- Error / Timeout --> Fail
+    WaitBSY2 -- Pending --> WaitBSY2
     WaitBSY2 -- Yes (Complete) --> Finish
 ```
 

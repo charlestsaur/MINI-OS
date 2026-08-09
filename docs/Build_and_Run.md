@@ -74,24 +74,28 @@ make run
 Equivalent current action:
 
 ```bash
-qemu-system-i386 -drive format=raw,file=build/mini_os.img
+qemu-system-i386 -drive file=build/mini_os.img,format=raw,if=ide,index=0,media=disk
 ```
 
-## 5. Kernel Size Guard
+The explicit IDE index is part of the current driver contract: after the BIOS loads the kernel, protected-mode filesystem I/O addresses the primary ATA channel's master device directly.
+
+## 5. Kernel Size Guard and Boot Reads
 
 The Makefile checks that kernel size does not exceed reserved area (`100` sectors).
+
 If exceeded, build stops with an explicit error.
 
-Application binaries have a separate 64 KiB build-time limit matching the
-loader image region.
+The boot sector probes EDD and reads those sectors individually with retries; if EDD is unavailable or fails, it retries through a CHS fallback.
+
+Each request uses offset zero and advances the destination segment, including at the 100-sector build limit, so no request crosses a 64 KiB offset boundary.
+
+Application binaries have a separate 64 KiB build-time limit matching the loader image region.
 
 ## 6. Dependency Tracking
 
-The kernel target depends on every assembly/layout include below
-`OS_src/kernel/`. Runtime and application targets depend on all public runtime
-headers and `syscall.def`. The Makefile itself is also an input to generated
-tools, objects, binaries, and the final image, so flag or recipe changes trigger
-the required rebuild.
+The kernel target depends on every assembly/layout include below `OS_src/kernel/`. Runtime and application targets depend on all public runtime headers and `syscall.def`.
+
+The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 
 ## 7. Common Build Issues
 
