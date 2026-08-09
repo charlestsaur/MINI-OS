@@ -103,10 +103,10 @@ int main(void) {
 MINI-OS uses an automated build toolchain:
 
 ```plaintext
-[ transport/apps/*.c ] ──> Clang (strict C90, -mno-sse) ──> [ build/*.o ]
-                                                              │
-[ crt0.o + minilibc.o ] ─────────────────────────> [ ld.lld / elf2bin ]
-                                                              │
+[ transport/apps/*.c ] ──> Clang (strict C90) ──> [ build/transport/apps/*.o ]
+                                                               │
+[ crt0.o + minilibc.o ] ───────────────> [ automatic ld.lld / elf2bin selection ]
+                                                               │
 [ transport/build/apps/*.bin ] ──> [ inject_transport ] ──> [ /transport/ in mini_os.img ]
 ```
 
@@ -223,6 +223,16 @@ sequenceDiagram
 - **System Call Integers**: `sys_exit` = 1, `sys_write` = 4
 
 The loader clears the full executable region before each run so zero-initialized
-static storage starts at zero. The flat-binary format has no relocation or
-segment metadata; code and initialized static data must fit below the heap
-boundary.
+static storage starts at zero. The flat-binary producer must preserve section
+placement so every zero-initialized symbol remains inside the 64 KiB application
+image. `ld.lld --oformat binary` may omit trailing zero-only bytes; this is safe
+because the loader clears the entire image. The `elf2bin` fallback explicitly
+materializes `SHT_NOBITS` placement and checks its output capacity. The format
+has no runtime relocation or segment metadata.
+
+The executable regression `transport/lib_test/test_bss.c` checks 12 KiB of
+zero-initialized static arrays and their writability. Run it with:
+
+```text
+run /transport/build/lib_test/test_bss.bin
+```

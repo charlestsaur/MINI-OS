@@ -1,9 +1,44 @@
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 
 #define ELF_MAGIC "\x7f" "ELF"
+#define ELFCLASS32 1U
+#define ELFDATA2LSB 1U
+#define EV_CURRENT 1U
+#define ET_REL 1U
+#define EM_386 3U
+
+#define SHT_PROGBITS 1U
+#define SHT_SYMTAB 2U
+#define SHT_STRTAB 3U
+#define SHT_RELA 4U
+#define SHT_NOBITS 8U
+#define SHT_REL 9U
+
+#define SHF_ALLOC 2U
+#define SHN_UNDEF 0U
+#define SHN_ABS 0xFFF1U
+#define SHN_COMMON 0xFFF2U
+
+#define STB_LOCAL 0U
+#define STB_GLOBAL 1U
+#define STB_WEAK 2U
+
+#define R_386_32 1U
+#define R_386_PC32 2U
+
+#define ELF32_ST_BIND(info) ((uint8_t)((info) >> 4))
+#define ELF32_R_SYM(value) ((value) >> 8)
+#define ELF32_R_TYPE(value) ((value) & 0xFFU)
+
+#define MAX_SYMBOLS 1024U
+#define MAX_SECTIONS 4096U
+#define MAX_INPUT_SIZE (64U * 1024U * 1024U)
+#define MAX_OUTPUT_SIZE (512U * 1024U)
+#define UNPLACED_SECTION UINT32_MAX
 
 #pragma pack(push, 1)
 typedef struct {
@@ -40,8 +75,8 @@ typedef struct {
     uint32_t st_name;
     uint32_t st_value;
     uint32_t st_size;
-    uint8_t  st_info;
-    uint8_t  st_other;
+    uint8_t st_info;
+    uint8_t st_other;
     uint16_t st_shndx;
 } Elf32_Sym;
 
@@ -51,223 +86,513 @@ typedef struct {
 } Elf32_Rel;
 #pragma pack(pop)
 
-#define SHT_PROGBITS 1
-#define SHT_SYMTAB   2
-#define SHT_STRTAB   3
-#define SHT_RELA     4
-#define SHT_NOBITS   8
-#define SHT_REL      9
-
-#define R_386_32   1
-#define R_386_PC32 2
-
-#define ELF32_R_SYM(val)  ((val) >> 8)
-#define ELF32_R_TYPE(val) ((val) & 0xff)
-
 typedef struct {
     char name[128];
-    uint32_t addr;
+    uint32_t address;
     int defined;
-} Symbol;
-
-#define MAX_SYMBOLS 1024
-#define MAX_BUF_SIZE (512 * 1024)
-
-static Symbol symtab_global[MAX_SYMBOLS];
-static int sym_count = 0;
-
-static uint8_t out_buf[MAX_BUF_SIZE];
-static uint32_t out_size = 0;
-
-static void add_symbol(const char *name, uint32_t addr, int defined) {
-    if (!name || strlen(name) == 0) return;
-    for (int i = 0; i < sym_count; i++) {
-        if (strcmp(symtab_global[i].name, name) == 0) {
-            if (defined && !symtab_global[i].defined) {
-                symtab_global[i].addr = addr;
-                symtab_global[i].defined = 1;
-            }
-            return;
-        }
-    }
-    if (sym_count < MAX_SYMBOLS) {
-        strncpy(symtab_global[sym_count].name, name, 127);
-        symtab_global[sym_count].addr = addr;
-        symtab_global[sym_count].defined = defined;
-        sym_count++;
-    }
-}
-
-static uint32_t find_symbol(const char *name) {
-    for (int i = 0; i < sym_count; i++) {
-        if (strcmp(symtab_global[i].name, name) == 0) {
-            if (!symtab_global[i].defined) {
-                fprintf(stderr, "Warning: Symbol '%s' referenced but undefined.\n", name);
-            }
-            return symtab_global[i].addr;
-        }
-    }
-    fprintf(stderr, "Error: Symbol '%s' not found.\n", name);
-    return 0;
-}
+    int weak;
+} GlobalSymbol;
 
 typedef struct {
     char name[128];
-    uint8_t *file_data;
-    Elf32_Ehdr *ehdr;
-    Elf32_Shdr *shdrs;
-    char *shstrtab;
-    uint32_t section_out_offs[64];
-} ObjFile;
+    uint8_t *data;
+    size_t size;
+    Elf32_Ehdr *header;
+    Elf32_Shdr *sections;
+    const char *section_names;
+    size_t section_names_size;
+    uint32_t *output_offsets;
+} ObjectFile;
 
-int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <output.bin> <base_addr_hex> <obj1.o> [obj2.o ...]\n", argv[0]);
-        return 1;
+static GlobalSymbol global_symbols[MAX_SYMBOLS];
+static size_t global_symbol_count;
+static uint8_t output_buffer[MAX_OUTPUT_SIZE];
+static uint32_t output_size;
+
+static int range_valid(uint64_t offset, uint64_t size, uint64_t total) {
+    return offset <= total && size <= total - offset;
+}
+
+static int power_of_two(uint32_t value) {
+    return value != 0U && (value & (value - 1U)) == 0U;
+}
+
+static int table_string(const char *table, size_t table_size, uint32_t offset,
+                        const char **string_out) {
+    if (offset >= table_size || memchr(table + offset, '\0', table_size - offset) == NULL) {
+        return -1;
     }
-
-    const char *out_file = argv[1];
-    uint32_t base_addr = (uint32_t)strtoul(argv[2], NULL, 0);
-
-    int num_objs = argc - 3;
-    ObjFile *objs = calloc(num_objs, sizeof(ObjFile));
-
-    memset(out_buf, 0, sizeof(out_buf));
-    out_size = 0;
-
-    // Pass 1: Read files and collect sections into out_buf
-    for (int o = 0; o < num_objs; o++) {
-        const char *filename = argv[o + 3];
-        strncpy(objs[o].name, filename, 127);
-
-        FILE *f = fopen(filename, "rb");
-        if (!f) {
-            perror(filename);
-            return 1;
-        }
-
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-
-        objs[o].file_data = malloc(sz);
-        fread(objs[o].file_data, 1, sz, f);
-        fclose(f);
-
-        Elf32_Ehdr *ehdr = (Elf32_Ehdr *)objs[o].file_data;
-        if (memcmp(ehdr->e_ident, ELF_MAGIC, 4) != 0 || ehdr->e_machine != 3) {
-            fprintf(stderr, "%s is not a valid 32-bit x86 ELF object.\n", filename);
-            return 1;
-        }
-
-        objs[o].ehdr = ehdr;
-        objs[o].shdrs = (Elf32_Shdr *)(objs[o].file_data + ehdr->e_shoff);
-        objs[o].shstrtab = (char *)(objs[o].file_data + objs[o].shdrs[ehdr->e_shstrndx].sh_offset);
-
-        // Copy SHF_ALLOC sections (.text, .rodata, .data)
-        for (int i = 0; i < ehdr->e_shnum; i++) {
-            Elf32_Shdr *sh = &objs[o].shdrs[i];
-            const char *sec_name = objs[o].shstrtab + sh->sh_name;
-
-            if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) && (sh->sh_flags & 2)) { // SHF_ALLOC = 2
-                // Align out_size
-                uint32_t align = sh->sh_addralign ? sh->sh_addralign : 4;
-                out_size = (out_size + align - 1) & ~(align - 1);
-
-                objs[o].section_out_offs[i] = out_size;
-                if (sh->sh_type == SHT_PROGBITS) {
-                    memcpy(out_buf + out_size, objs[o].file_data + sh->sh_offset, sh->sh_size);
-                } else {
-                    memset(out_buf + out_size, 0, sh->sh_size);
-                }
-                out_size += sh->sh_size;
-            }
-        }
-    }
-
-    // Pass 2: Collect Symbols
-    for (int o = 0; o < num_objs; o++) {
-        Elf32_Ehdr *ehdr = objs[o].ehdr;
-        for (int i = 0; i < ehdr->e_shnum; i++) {
-            Elf32_Shdr *sh = &objs[o].shdrs[i];
-            if (sh->sh_type == SHT_SYMTAB) {
-                Elf32_Sym *syms = (Elf32_Sym *)(objs[o].file_data + sh->sh_offset);
-                int num_syms = sh->sh_size / sizeof(Elf32_Sym);
-                char *strtab = (char *)(objs[o].file_data + objs[o].shdrs[sh->sh_link].sh_offset);
-
-                for (int s = 0; s < num_syms; s++) {
-                    const char *sym_name = strtab + syms[s].st_name;
-                    uint16_t shndx = syms[s].st_shndx;
-
-                    if (shndx > 0 && shndx < ehdr->e_shnum) {
-                        uint32_t sec_off = objs[o].section_out_offs[shndx];
-                        uint32_t sym_addr = base_addr + sec_off + syms[s].st_value;
-                        add_symbol(sym_name, sym_addr, 1);
-                    } else if (shndx == 0 && strlen(sym_name) > 0) {
-                        add_symbol(sym_name, 0, 0);
-                    }
-                }
-            }
-        }
-    }
-
-    // Pass 3: Apply Relocations (R_386_32 & R_386_PC32)
-    for (int o = 0; o < num_objs; o++) {
-        Elf32_Ehdr *ehdr = objs[o].ehdr;
-        for (int i = 0; i < ehdr->e_shnum; i++) {
-            Elf32_Shdr *sh = &objs[o].shdrs[i];
-            if (sh->sh_type == SHT_REL) {
-                uint32_t target_sec = sh->sh_info;
-                uint32_t sec_out_off = objs[o].section_out_offs[target_sec];
-
-                Elf32_Rel *rels = (Elf32_Rel *)(objs[o].file_data + sh->sh_offset);
-                int num_rels = sh->sh_size / sizeof(Elf32_Rel);
-
-                Elf32_Shdr *symsec = &objs[o].shdrs[sh->sh_link];
-                Elf32_Sym *syms = (Elf32_Sym *)(objs[o].file_data + symsec->sh_offset);
-                char *strtab = (char *)(objs[o].file_data + objs[o].shdrs[symsec->sh_link].sh_offset);
-
-                for (int r = 0; r < num_rels; r++) {
-                    uint32_t sym_idx = ELF32_R_SYM(rels[r].r_info);
-                    uint32_t type = ELF32_R_TYPE(rels[r].r_info);
-
-                    Elf32_Sym *sym = &syms[sym_idx];
-                    const char *sym_name = strtab + sym->st_name;
-
-                    uint32_t S = 0;
-                    if (sym->st_shndx > 0 && sym->st_shndx < ehdr->e_shnum) {
-                        S = base_addr + objs[o].section_out_offs[sym->st_shndx] + sym->st_value;
-                    } else {
-                        S = find_symbol(sym_name);
-                    }
-
-                    uint32_t P = base_addr + sec_out_off + rels[r].r_offset;
-                    uint32_t *patch_loc = (uint32_t *)(out_buf + sec_out_off + rels[r].r_offset);
-                    int32_t A = (int32_t)*patch_loc;
-
-                    if (type == R_386_32) {
-                        *patch_loc = S + A;
-                    } else if (type == R_386_PC32) {
-                        *patch_loc = S + A - P;
-                    } else {
-                        fprintf(stderr, "Unsupported relocation type %u in %s\n", type, objs[o].name);
-                    }
-                }
-            }
-        }
-    }
-
-    FILE *out_fp = fopen(out_file, "wb");
-    if (!out_fp) {
-        perror(out_file);
-        return 1;
-    }
-    fwrite(out_buf, 1, out_size, out_fp);
-    fclose(out_fp);
-
-    printf("elf2bin: Generated '%s' (%u bytes) at base 0x%08X\n", out_file, out_size, base_addr);
-
-    for (int o = 0; o < num_objs; o++) free(objs[o].file_data);
-    free(objs);
+    *string_out = table + offset;
     return 0;
+}
+
+static int add_global_symbol(const char *name, uint32_t address,
+                             int defined, int weak) {
+    size_t i;
+    size_t length;
+
+    if (name == NULL || name[0] == '\0') return 0;
+    length = strlen(name);
+    if (length >= sizeof(global_symbols[0].name)) {
+        fprintf(stderr, "Error: symbol name is too long: '%s'.\n", name);
+        return -1;
+    }
+    for (i = 0; i < global_symbol_count; i++) {
+        if (strcmp(global_symbols[i].name, name) != 0) continue;
+        if (!defined) return 0;
+        if (!global_symbols[i].defined) {
+            global_symbols[i].address = address;
+            global_symbols[i].defined = 1;
+            global_symbols[i].weak = weak;
+            return 0;
+        }
+        if (!global_symbols[i].weak && !weak) {
+            fprintf(stderr, "Error: duplicate strong symbol '%s'.\n", name);
+            return -1;
+        }
+        if (global_symbols[i].weak && !weak) {
+            global_symbols[i].address = address;
+            global_symbols[i].weak = 0;
+        }
+        return 0;
+    }
+    if (global_symbol_count == MAX_SYMBOLS) {
+        fprintf(stderr, "Error: global symbol capacity (%u) exceeded.\n", MAX_SYMBOLS);
+        return -1;
+    }
+    memcpy(global_symbols[global_symbol_count].name, name, length + 1U);
+    global_symbols[global_symbol_count].address = address;
+    global_symbols[global_symbol_count].defined = defined;
+    global_symbols[global_symbol_count].weak = weak;
+    global_symbol_count++;
+    return 0;
+}
+
+static int find_global_symbol(const char *name, uint32_t *address_out) {
+    size_t i;
+
+    for (i = 0; i < global_symbol_count; i++) {
+        if (strcmp(global_symbols[i].name, name) == 0) {
+            if (!global_symbols[i].defined) {
+                fprintf(stderr, "Error: symbol '%s' is undefined.\n", name);
+                return -1;
+            }
+            *address_out = global_symbols[i].address;
+            return 0;
+        }
+    }
+    fprintf(stderr, "Error: symbol '%s' is missing.\n", name);
+    return -1;
+}
+
+static void free_objects(ObjectFile *objects, int count) {
+    int i;
+
+    if (objects == NULL) return;
+    for (i = 0; i < count; i++) {
+        free(objects[i].output_offsets);
+        free(objects[i].data);
+    }
+    free(objects);
+}
+
+static int validate_section(ObjectFile *object, uint32_t index) {
+    Elf32_Shdr *section;
+    const char *unused_name;
+
+    section = &object->sections[index];
+    if (table_string(object->section_names, object->section_names_size,
+                     section->sh_name, &unused_name) < 0) {
+        fprintf(stderr, "Error: %s section %u has an invalid name offset.\n",
+                object->name, index);
+        return -1;
+    }
+    if (section->sh_type != SHT_NOBITS &&
+        !range_valid(section->sh_offset, section->sh_size, object->size)) {
+        fprintf(stderr, "Error: %s section %u lies outside the file.\n",
+                object->name, index);
+        return -1;
+    }
+    if (section->sh_addralign != 0U && !power_of_two(section->sh_addralign)) {
+        fprintf(stderr, "Error: %s section %u has invalid alignment %u.\n",
+                object->name, index, section->sh_addralign);
+        return -1;
+    }
+    if (section->sh_type == SHT_RELA) {
+        fprintf(stderr, "Error: %s uses unsupported RELA relocations.\n", object->name);
+        return -1;
+    }
+    if (section->sh_type == SHT_SYMTAB &&
+        (section->sh_entsize != sizeof(Elf32_Sym) ||
+         section->sh_size % sizeof(Elf32_Sym) != 0U)) {
+        fprintf(stderr, "Error: %s has a malformed symbol table.\n", object->name);
+        return -1;
+    }
+    if (section->sh_type == SHT_REL &&
+        (section->sh_entsize != sizeof(Elf32_Rel) ||
+         section->sh_size % sizeof(Elf32_Rel) != 0U)) {
+        fprintf(stderr, "Error: %s has a malformed relocation table.\n", object->name);
+        return -1;
+    }
+    return 0;
+}
+
+static int read_object(ObjectFile *object, const char *filename) {
+    FILE *file;
+    long file_size;
+    uint64_t section_table_size;
+    Elf32_Shdr *name_section;
+    uint32_t i;
+    size_t name_length;
+
+    name_length = strlen(filename);
+    if (name_length >= sizeof(object->name)) {
+        fprintf(stderr, "Error: object path is too long: '%s'.\n", filename);
+        return -1;
+    }
+    memcpy(object->name, filename, name_length + 1U);
+    file = fopen(filename, "rb");
+    if (file == NULL) {
+        fprintf(stderr, "Error: cannot open '%s': %s\n", filename, strerror(errno));
+        return -1;
+    }
+    if (fseek(file, 0, SEEK_END) != 0 || (file_size = ftell(file)) < 0 ||
+        fseek(file, 0, SEEK_SET) != 0 || file_size < (long)sizeof(Elf32_Ehdr) ||
+        (uint64_t)file_size > MAX_INPUT_SIZE) {
+        fprintf(stderr, "Error: invalid object size for '%s'.\n", filename);
+        fclose(file);
+        return -1;
+    }
+    object->size = (size_t)file_size;
+    object->data = malloc(object->size);
+    if (object->data == NULL) {
+        fclose(file);
+        return -1;
+    }
+    if (fread(object->data, 1, object->size, file) != object->size) {
+        fprintf(stderr, "Error: cannot read complete object '%s'.\n", filename);
+        fclose(file);
+        return -1;
+    }
+    if (fclose(file) != 0) {
+        fprintf(stderr, "Error: cannot close object '%s'.\n", filename);
+        return -1;
+    }
+
+    object->header = (Elf32_Ehdr *)object->data;
+    if (memcmp(object->header->e_ident, ELF_MAGIC, 4U) != 0 ||
+        object->header->e_ident[4] != ELFCLASS32 ||
+        object->header->e_ident[5] != ELFDATA2LSB ||
+        object->header->e_ident[6] != EV_CURRENT ||
+        object->header->e_type != ET_REL || object->header->e_machine != EM_386 ||
+        object->header->e_version != EV_CURRENT ||
+        object->header->e_ehsize != sizeof(Elf32_Ehdr) ||
+        object->header->e_shentsize != sizeof(Elf32_Shdr) ||
+        object->header->e_shnum == 0U || object->header->e_shnum > MAX_SECTIONS ||
+        object->header->e_shstrndx >= object->header->e_shnum) {
+        fprintf(stderr, "Error: '%s' is not a supported 32-bit x86 relocatable ELF.\n",
+                filename);
+        return -1;
+    }
+    section_table_size = (uint64_t)object->header->e_shnum * sizeof(Elf32_Shdr);
+    if (!range_valid(object->header->e_shoff, section_table_size, object->size)) {
+        fprintf(stderr, "Error: '%s' has an out-of-range section table.\n", filename);
+        return -1;
+    }
+    object->sections = (Elf32_Shdr *)(object->data + object->header->e_shoff);
+    name_section = &object->sections[object->header->e_shstrndx];
+    if (name_section->sh_type != SHT_STRTAB ||
+        !range_valid(name_section->sh_offset, name_section->sh_size, object->size)) {
+        fprintf(stderr, "Error: '%s' has an invalid section-name table.\n", filename);
+        return -1;
+    }
+    object->section_names = (const char *)(object->data + name_section->sh_offset);
+    object->section_names_size = name_section->sh_size;
+    object->output_offsets = malloc((size_t)object->header->e_shnum * sizeof(uint32_t));
+    if (object->output_offsets == NULL) return -1;
+    for (i = 0; i < object->header->e_shnum; i++) {
+        object->output_offsets[i] = UNPLACED_SECTION;
+        if (validate_section(object, i) < 0) return -1;
+    }
+    return 0;
+}
+
+static int place_sections(ObjectFile *object, uint32_t base_address) {
+    uint32_t i;
+    uint32_t alignment;
+    uint64_t aligned;
+    uint64_t end;
+    Elf32_Shdr *section;
+
+    for (i = 0; i < object->header->e_shnum; i++) {
+        section = &object->sections[i];
+        if ((section->sh_type != SHT_PROGBITS && section->sh_type != SHT_NOBITS) ||
+            (section->sh_flags & SHF_ALLOC) == 0U) {
+            continue;
+        }
+        alignment = section->sh_addralign == 0U ? 1U : section->sh_addralign;
+        aligned = ((uint64_t)output_size + alignment - 1U) & ~((uint64_t)alignment - 1U);
+        end = aligned + section->sh_size;
+        if (aligned > UINT32_MAX || end > MAX_OUTPUT_SIZE ||
+            (uint64_t)base_address + end > UINT32_MAX) {
+            fprintf(stderr, "Error: allocatable sections exceed the flat-output capacity.\n");
+            return -1;
+        }
+        object->output_offsets[i] = (uint32_t)aligned;
+        if (section->sh_type == SHT_PROGBITS && section->sh_size != 0U) {
+            memcpy(output_buffer + aligned, object->data + section->sh_offset,
+                   section->sh_size);
+        } else if (section->sh_size != 0U) {
+            memset(output_buffer + aligned, 0, section->sh_size);
+        }
+        output_size = (uint32_t)end;
+    }
+    return 0;
+}
+
+static int symbol_table_parts(ObjectFile *object, Elf32_Shdr *symbol_section,
+                              Elf32_Sym **symbols_out, uint32_t *count_out,
+                              const char **strings_out, size_t *string_size_out) {
+    Elf32_Shdr *string_section;
+
+    if (symbol_section->sh_type != SHT_SYMTAB ||
+        symbol_section->sh_link >= object->header->e_shnum) return -1;
+    string_section = &object->sections[symbol_section->sh_link];
+    if (string_section->sh_type != SHT_STRTAB) return -1;
+    *symbols_out = (Elf32_Sym *)(object->data + symbol_section->sh_offset);
+    *count_out = symbol_section->sh_size / (uint32_t)sizeof(Elf32_Sym);
+    *strings_out = (const char *)(object->data + string_section->sh_offset);
+    *string_size_out = string_section->sh_size;
+    return 0;
+}
+
+static int symbol_address(ObjectFile *object, const Elf32_Sym *symbol,
+                          const char *name, uint32_t base_address,
+                          uint32_t *address_out) {
+    uint64_t address;
+
+    if (symbol->st_shndx == SHN_UNDEF) return find_global_symbol(name, address_out);
+    if (symbol->st_shndx == SHN_ABS) {
+        *address_out = symbol->st_value;
+        return 0;
+    }
+    if (symbol->st_shndx == SHN_COMMON) {
+        fprintf(stderr, "Error: common symbol '%s' is unsupported.\n", name);
+        return -1;
+    }
+    if (symbol->st_shndx >= object->header->e_shnum ||
+        object->output_offsets[symbol->st_shndx] == UNPLACED_SECTION ||
+        symbol->st_value > object->sections[symbol->st_shndx].sh_size) {
+        fprintf(stderr, "Error: symbol '%s' refers to an invalid output section.\n", name);
+        return -1;
+    }
+    address = (uint64_t)base_address + object->output_offsets[symbol->st_shndx] +
+              symbol->st_value;
+    if (address > UINT32_MAX) return -1;
+    *address_out = (uint32_t)address;
+    return 0;
+}
+
+static int collect_symbols(ObjectFile *object, uint32_t base_address) {
+    uint32_t i;
+    uint32_t s;
+    uint32_t count;
+    uint32_t address;
+    Elf32_Shdr *section;
+    Elf32_Sym *symbols;
+    const char *strings;
+    const char *name;
+    size_t strings_size;
+    uint8_t binding;
+
+    for (i = 0; i < object->header->e_shnum; i++) {
+        section = &object->sections[i];
+        if (section->sh_type != SHT_SYMTAB) continue;
+        if (symbol_table_parts(object, section, &symbols, &count,
+                               &strings, &strings_size) < 0) {
+            fprintf(stderr, "Error: %s has invalid symbol-table links.\n", object->name);
+            return -1;
+        }
+        for (s = 0; s < count; s++) {
+            if (table_string(strings, strings_size, symbols[s].st_name, &name) < 0) {
+                fprintf(stderr, "Error: %s has an invalid symbol name.\n", object->name);
+                return -1;
+            }
+            binding = ELF32_ST_BIND(symbols[s].st_info);
+            if (binding == STB_LOCAL || name[0] == '\0') continue;
+            if (binding != STB_GLOBAL && binding != STB_WEAK) {
+                fprintf(stderr, "Error: %s uses unsupported symbol binding %u.\n",
+                        object->name, binding);
+                return -1;
+            }
+            if (symbols[s].st_shndx == SHN_UNDEF) {
+                if (add_global_symbol(name, 0U, 0, binding == STB_WEAK) < 0) return -1;
+            } else {
+                if (symbol_address(object, &symbols[s], name, base_address, &address) < 0 ||
+                    add_global_symbol(name, address, 1, binding == STB_WEAK) < 0) {
+                    return -1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int ensure_symbols_resolved(void) {
+    size_t i;
+
+    for (i = 0; i < global_symbol_count; i++) {
+        if (!global_symbols[i].defined) {
+            fprintf(stderr, "Error: symbol '%s' remains undefined.\n",
+                    global_symbols[i].name);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int apply_relocations(ObjectFile *object, uint32_t base_address) {
+    uint32_t i;
+    uint32_t r;
+    uint32_t relocation_count;
+    uint32_t symbol_count;
+    uint32_t symbol_index;
+    uint32_t type;
+    uint32_t target_index;
+    uint32_t target_offset;
+    uint32_t patch_offset;
+    uint32_t symbol_value;
+    uint32_t place;
+    uint32_t patched;
+    int32_t addend;
+    Elf32_Shdr *relocation_section;
+    Elf32_Shdr *target_section;
+    Elf32_Shdr *symbol_section;
+    Elf32_Rel *relocations;
+    Elf32_Sym *symbols;
+    const char *strings;
+    const char *name;
+    size_t strings_size;
+
+    for (i = 0; i < object->header->e_shnum; i++) {
+        relocation_section = &object->sections[i];
+        if (relocation_section->sh_type != SHT_REL) continue;
+        target_index = relocation_section->sh_info;
+        if (target_index >= object->header->e_shnum ||
+            relocation_section->sh_link >= object->header->e_shnum ||
+            object->output_offsets[target_index] == UNPLACED_SECTION) {
+            fprintf(stderr, "Error: %s relocation targets an invalid section.\n", object->name);
+            return -1;
+        }
+        target_section = &object->sections[target_index];
+        target_offset = object->output_offsets[target_index];
+        symbol_section = &object->sections[relocation_section->sh_link];
+        if (symbol_table_parts(object, symbol_section, &symbols, &symbol_count,
+                               &strings, &strings_size) < 0) {
+            fprintf(stderr, "Error: %s relocation has an invalid symbol table.\n", object->name);
+            return -1;
+        }
+        relocations = (Elf32_Rel *)(object->data + relocation_section->sh_offset);
+        relocation_count = relocation_section->sh_size / (uint32_t)sizeof(Elf32_Rel);
+        for (r = 0; r < relocation_count; r++) {
+            symbol_index = ELF32_R_SYM(relocations[r].r_info);
+            type = ELF32_R_TYPE(relocations[r].r_info);
+            if (symbol_index >= symbol_count ||
+                !range_valid(relocations[r].r_offset, sizeof(uint32_t), target_section->sh_size)) {
+                fprintf(stderr, "Error: %s relocation %u is out of range.\n", object->name, r);
+                return -1;
+            }
+            if (type != R_386_32 && type != R_386_PC32) {
+                fprintf(stderr, "Error: unsupported relocation type %u in %s.\n",
+                        type, object->name);
+                return -1;
+            }
+            if (table_string(strings, strings_size, symbols[symbol_index].st_name, &name) < 0 ||
+                symbol_address(object, &symbols[symbol_index], name, base_address,
+                               &symbol_value) < 0) {
+                return -1;
+            }
+            patch_offset = target_offset + relocations[r].r_offset;
+            if (!range_valid(patch_offset, sizeof(uint32_t), output_size)) return -1;
+            memcpy(&addend, output_buffer + patch_offset, sizeof(addend));
+            place = base_address + patch_offset;
+            patched = type == R_386_32 ? symbol_value + (uint32_t)addend :
+                      symbol_value + (uint32_t)addend - place;
+            memcpy(output_buffer + patch_offset, &patched, sizeof(patched));
+        }
+    }
+    return 0;
+}
+
+static int write_output(const char *path) {
+    FILE *file;
+    int result;
+
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        fprintf(stderr, "Error: cannot create '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+    result = 0;
+    if (fwrite(output_buffer, 1, output_size, file) != output_size) result = -1;
+    if (fflush(file) != 0) result = -1;
+    if (fclose(file) != 0) result = -1;
+    if (result < 0) {
+        fprintf(stderr, "Error: cannot write complete output '%s'.\n", path);
+        remove(path);
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *output_path;
+    char *end;
+    unsigned long parsed_base;
+    uint32_t base_address;
+    ObjectFile *objects;
+    int object_count;
+    int i;
+    int result;
+
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s <output.bin> <base_addr> <obj1.o> [obj2.o ...]\n",
+                argv[0]);
+        return 1;
+    }
+    output_path = argv[1];
+    errno = 0;
+    parsed_base = strtoul(argv[2], &end, 0);
+    if (errno != 0 || end == argv[2] || *end != '\0' || parsed_base > UINT32_MAX) {
+        fprintf(stderr, "Error: invalid base address '%s'.\n", argv[2]);
+        return 1;
+    }
+    base_address = (uint32_t)parsed_base;
+    object_count = argc - 3;
+    objects = calloc((size_t)object_count, sizeof(*objects));
+    if (objects == NULL) return 1;
+    memset(output_buffer, 0, sizeof(output_buffer));
+    output_size = 0U;
+    global_symbol_count = 0U;
+
+    result = 0;
+    for (i = 0; i < object_count && result == 0; i++) {
+        if (read_object(&objects[i], argv[i + 3]) < 0 ||
+            place_sections(&objects[i], base_address) < 0) result = -1;
+    }
+    for (i = 0; i < object_count && result == 0; i++) {
+        if (collect_symbols(&objects[i], base_address) < 0) result = -1;
+    }
+    if (result == 0 && ensure_symbols_resolved() < 0) result = -1;
+    for (i = 0; i < object_count && result == 0; i++) {
+        if (apply_relocations(&objects[i], base_address) < 0) result = -1;
+    }
+    if (result == 0 && write_output(output_path) < 0) result = -1;
+
+    if (result == 0) {
+        printf("elf2bin: generated '%s' (%u bytes) at base 0x%08X\n",
+               output_path, output_size, base_address);
+    }
+    free_objects(objects, object_count);
+    return result == 0 ? 0 : 1;
 }

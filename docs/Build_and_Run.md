@@ -7,8 +7,11 @@ This document only covers build, image generation, and local execution.
 Required tools:
 
 - `nasm`
+- `cc` for the two modern-C host tools
+- `clang` for the freestanding runtime, applications, and tests
+- `ld.lld` when available; otherwise the checked `elf2bin` fallback is selected
 - `qemu-system-i386`
-- shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`)
+- shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
 
 ## 2. Source and Output Paths
 
@@ -21,7 +24,13 @@ Build outputs:
 
 - `build/boot.bin`
 - `build/kernel.bin`
+- `build/inject_transport`
+- `build/elf2bin`
 - `build/mini_os.img`
+- `build/transport/apps/*.o`
+- `build/transport/lib_test/*.o`
+- `transport/build/apps/*.bin`
+- `transport/build/lib_test/*.bin`
 
 ## 3. Build Commands
 
@@ -34,12 +43,27 @@ make
 
 What happens:
 
-1. Assemble kernel binary.
-2. Compute kernel sector count.
-3. Assemble boot binary with `KERNEL_SECTORS` define.
-4. Create raw disk image (`4096` sectors).
-5. Write boot sector to LBA 0.
-6. Write kernel binary starting at LBA 1.
+1. Build the modern-C host tools and runtime library.
+2. Compile every application and test with strict C90 diagnostics.
+3. Link each flat binary with `ld.lld`, or automatically use `elf2bin` when
+   `ld.lld` is unavailable.
+4. Assemble the kernel and compute its boot-time sector count.
+5. Create a raw image of exactly 4,471 sectors, derived from the shared
+   `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
+6. Assert the resulting byte size, write boot/kernel sectors, validate the same
+   geometry in the injector, and inject the sorted `transport/` tree.
+
+Host metadata such as `.DS_Store`, `._*`, `Thumbs.db`, and `.git` is excluded.
+An image or host-file I/O failure makes the injector and build return nonzero.
+
+To build one application:
+
+```bash
+make app APP=hello.c
+```
+
+Objects retain their source path below `build/transport/`, so an application
+and a library test may safely share a basename.
 
 ## 4. Run in QEMU
 
@@ -58,7 +82,18 @@ qemu-system-i386 -drive format=raw,file=build/mini_os.img
 The Makefile checks that kernel size does not exceed reserved area (`100` sectors).
 If exceeded, build stops with an explicit error.
 
-## 6. Common Build Issues
+Application binaries have a separate 64 KiB build-time limit matching the
+loader image region.
+
+## 6. Dependency Tracking
+
+The kernel target depends on every assembly/layout include below
+`OS_src/kernel/`. Runtime and application targets depend on all public runtime
+headers and `syscall.def`. The Makefile itself is also an input to generated
+tools, objects, binaries, and the final image, so flag or recipe changes trigger
+the required rebuild.
+
+## 7. Common Build Issues
 
 ### Missing `nasm`
 
@@ -72,7 +107,7 @@ Symptom: `make run` fails to launch emulator.
 
 Symptom: image write or cleanup commands fail.
 
-## 7. Real Hardware
+## 8. Real Hardware
 
 Physical machine flashing/boot instructions are documented separately in:
 

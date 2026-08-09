@@ -64,21 +64,23 @@ This document only describes code/file responsibilities.
 ## 8. Host Tools & User Applications
 
 - `tools/inject_transport.c`
-  - host C program for parsing MINI-OS disk images and injecting compiled binaries into `/external/`
+  - checked host C program for deterministic injection of the `transport/` tree
+    at `/transport/`
+  - validates image geometry and FAT chains and propagates mutation failures
 
 - `tools/elf2bin.c`
   - host C 32-bit ELF linker and flat binary generator
 
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
-  - `minilibc.h` / `minilibc.c`: C90 standard library & heap allocator (`malloc`/`free`)
+  - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
 
 - `transport/apps/`
-  - C90 user application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`)
+  - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
 
 - `transport/lib_test/`
-  - dedicated C library test suites (`test_string.c`, `test_heap.c`)
+  - strict C90 executable tests, including `test_bss.c`
 
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)

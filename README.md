@@ -38,9 +38,9 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
 - `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`)
 - `transport/`: host files injected into `/transport/` on disk image
-  - `transport/lib/`: C90 runtime library, `crt0.asm`, and standard C header wrappers
-  - `transport/apps/`: user C applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`)
-  - `transport/lib_test/`: dedicated C library test suites (`test_string.c`, `test_heap.c`)
+  - `transport/lib/`: modern-C runtime library, `crt0.asm`, and standard C header wrappers
+  - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
+  - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
 - `docs/`: project documentation
 - `build/`: generated kernel binaries and disk image
@@ -95,9 +95,11 @@ Sector layout in current implementation:
 - `LBA 1..100`: reserved kernel area
 - `LBA 101`: superblock
 - `LBA 102`: inode bitmap
-- `LBA 103..110`: data bitmap
-- `LBA 111..366`: inode table
-- `LBA 367+`: data blocks
+- `LBA 103..118`: FAT
+- `LBA 119..374`: inode table
+- `LBA 375..4470`: 4,096 data blocks
+
+The generated image is exactly 4,471 sectors (2,289,152 bytes).
 
 ## Documentation Index
 
