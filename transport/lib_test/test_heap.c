@@ -8,101 +8,104 @@ struct large_item {
     char padding[300];
 };
 
-static int compare_ints(const void *a, const void *b) {
-    int arg1 = *(const int *)a;
-    int arg2 = *(const int *)b;
-    if (arg1 < arg2) return -1;
-    if (arg1 > arg2) return 1;
+static int failures = 0;
+
+static void check(int condition, const char *name) {
+    if (!condition) {
+        printf("FAIL: %s\n", name);
+        failures++;
+    }
+}
+
+static int compare_ints(const void *left, const void *right) {
+    int a = *(const int *)left;
+    int b = *(const int *)right;
+    if (a < b) return -1;
+    if (a > b) return 1;
     return 0;
 }
 
-static int compare_large_items(const void *a, const void *b) {
-    const struct large_item *left = (const struct large_item *)a;
-    const struct large_item *right = (const struct large_item *)b;
-    if (left->key < right->key) return -1;
-    if (left->key > right->key) return 1;
+static int compare_large_items(const void *left, const void *right) {
+    const struct large_item *a = (const struct large_item *)left;
+    const struct large_item *b = (const struct large_item *)right;
+    if (a->key < b->key) return -1;
+    if (a->key > b->key) return 1;
     return 0;
 }
 
 int main(void) {
-    int *arr;
+    static const int expected_sorted[8] = {0, 33, 56, 61, 69, 77, 81, 93};
+    int *values;
+    int *found;
+    int *zeros;
     int i;
-    size_t count = 8;
+    char *end;
     struct large_item items[2];
     void *blocks[64];
     int allocated;
 
-    puts("==========================================");
-    puts("   MINI-OS Phase 2 Heap & Stdlib Test");
-    puts("==========================================");
+    values = (int *)malloc(8U * sizeof(int));
+    check(values != NULL, "malloc");
+    if (values == NULL) return 1;
 
-    /* 1. Test malloc */
-    arr = (int *)malloc(count * sizeof(int));
-    if (!arr) {
-        puts("ERROR: malloc returned NULL!");
-        return 1;
+    srand(42U);
+    for (i = 0; i < 8; i++) values[i] = rand() % 100;
+    qsort(values, 8U, sizeof(int), compare_ints);
+    check(memcmp(values, expected_sorted, sizeof(expected_sorted)) == 0,
+          "rand sequence and qsort result");
+
+    values = (int *)realloc(values, 16U * sizeof(int));
+    check(values != NULL, "realloc growth");
+    if (values == NULL) return 1;
+    check(memcmp(values, expected_sorted, sizeof(expected_sorted)) == 0,
+          "realloc preserves contents");
+    free(values);
+
+    zeros = (int *)calloc(16U, sizeof(int));
+    check(zeros != NULL, "calloc");
+    if (zeros != NULL) {
+        for (i = 0; i < 16; i++) check(zeros[i] == 0, "calloc zero byte range");
+        free(zeros);
     }
-    printf("1. malloc(%u bytes) successful at %p\n",
-           (unsigned int)(count * sizeof(int)), (void *)arr);
-
-    /* 2. Test rand & array populate */
-    srand(42);
-    for (i = 0; i < (int)count; i++) {
-        arr[i] = rand() % 100;
-    }
-
-    printf("2. Random array before qsort: ");
-    for (i = 0; i < (int)count; i++) {
-        printf("%d ", arr[i]);
-    }
-    printf("\n");
-
-    /* 3. Test qsort */
-    qsort(arr, count, sizeof(int), compare_ints);
-    printf("3. Array after qsort:         ");
-    for (i = 0; i < (int)count; i++) {
-        printf("%d ", arr[i]);
-    }
-    printf("\n");
-
-    /* 4. Test realloc */
-    arr = (int *)realloc(arr, (count * 2) * sizeof(int));
-    if (!arr) {
-        puts("ERROR: realloc failed!");
-        return 1;
-    }
-    printf("4. realloc to %u bytes successful at %p\n",
-           (unsigned int)(count * 2 * sizeof(int)), (void *)arr);
-
-    /* 5. Test free */
-    free(arr);
-    puts("5. free(arr) completed.");
+    check(calloc(UINT_MAX, 2U) == NULL && malloc(UINT_MAX) == NULL,
+          "allocation overflow rejection");
 
     items[0].key = 2;
     items[1].key = 1;
-    qsort(items, 2, sizeof(items[0]), compare_large_items);
-    if (items[0].key != 1 || items[1].key != 2) {
-        puts("FAIL: qsort large elements");
-        return 1;
-    }
+    memset(items[0].padding, 'A', sizeof(items[0].padding));
+    memset(items[1].padding, 'B', sizeof(items[1].padding));
+    qsort(items, 2U, sizeof(items[0]), compare_large_items);
+    check(items[0].key == 1 && items[1].key == 2 &&
+          items[0].padding[0] == 'B' && items[1].padding[0] == 'A',
+          "qsort large elements");
 
-    if (calloc(UINT_MAX, 2) != NULL || malloc(UINT_MAX) != NULL) {
-        puts("FAIL: allocation overflow");
-        return 1;
-    }
+    found = (int *)bsearch(&expected_sorted[4], expected_sorted, 8U,
+                           sizeof(int), compare_ints);
+    check(found != NULL && *found == 69, "bsearch hit");
+    i = 70;
+    check(bsearch(&i, expected_sorted, 8U, sizeof(int), compare_ints) == NULL,
+          "bsearch miss");
+    check(atoi(" -123x") == -123, "atoi");
+    check(strtol("0x2a!", &end, 0) == 42L && *end == '!', "strtol base detection");
+    check(strtoul("17z", &end, 8) == 15UL && *end == 'z', "strtoul base 8");
+    check(abs(-7) == 7 && labs(-9L) == 9L, "abs and labs");
 
     allocated = 0;
     while (allocated < 64) {
-        blocks[allocated] = malloc(4096);
+        blocks[allocated] = malloc(4096U);
         if (blocks[allocated] == NULL) break;
         allocated++;
     }
-    if (allocated == 64 || malloc(4096) != NULL) {
-        puts("FAIL: heap exhaustion");
-        return 1;
-    }
+    check(allocated < 64 && malloc(4096U) == NULL, "heap exhaustion");
     for (i = 0; i < allocated; i++) free(blocks[i]);
+    values = (int *)malloc(4096U);
+    check(values != NULL, "freed heap is reusable");
+    free(values);
 
-    puts("HEAP/STDLIB TESTS PASSED");
-    return 0;
+    if (failures == 0) {
+        puts("HEAP/STDLIB TESTS PASSED");
+        return 0;
+    }
+    printf("HEAP/STDLIB FAILURES: %d\n", failures);
+    return 1;
 }

@@ -4,6 +4,12 @@
 
 static int failures = 0;
 
+#define CROSS_SIZE 1300U
+#define APPEND_SIZE 11U
+
+static unsigned char cross_written[CROSS_SIZE + APPEND_SIZE];
+static unsigned char cross_read[CROSS_SIZE + APPEND_SIZE];
+
 static void check(int condition, const char *name) {
     if (!condition) {
         printf("FAIL: %s\n", name);
@@ -26,6 +32,10 @@ int main(void) {
     FILE *fp;
     char buffer[16];
     size_t count;
+    unsigned int i;
+    static const char begin_marker[] = "E2E-BEGIN\n";
+    static const char end_marker[] = "E2E-END\n";
+    static const char append_marker[] = "E2E-APPEND\n";
 
     fp = fopen("syslib.txt", "w");
     check(fp != NULL, "open w");
@@ -107,6 +117,59 @@ int main(void) {
     }
 
     check(fopen("syslib.txt", "bad") == NULL, "invalid mode rejected");
+    check(fopen("syslib.txt", "r++") == NULL, "duplicate plus mode rejected");
+
+    for (i = 0U; i < CROSS_SIZE; i++) {
+        cross_written[i] = (unsigned char)('a' + (i % 26U));
+    }
+    memcpy(cross_written, begin_marker, sizeof(begin_marker) - 1U);
+    memcpy(cross_written + CROSS_SIZE - (sizeof(end_marker) - 1U),
+           end_marker, sizeof(end_marker) - 1U);
+    memcpy(cross_written + CROSS_SIZE, append_marker, APPEND_SIZE);
+
+    fp = fopen("syslib.txt", "w");
+    check(fp != NULL, "open cross-sector file");
+    if (fp != NULL) {
+        check(fwrite(cross_written, 1U, CROSS_SIZE, fp) == CROSS_SIZE,
+              "cross-sector write count");
+        check(ftell(fp) == (long)CROSS_SIZE, "cross-sector write position");
+        check(fclose(fp) == 0, "cross-sector close");
+    }
+
+    fp = fopen("syslib.txt", "r");
+    check(fp != NULL, "reopen cross-sector file");
+    if (fp != NULL) {
+        memset(cross_read, 0, sizeof(cross_read));
+        count = fread(cross_read, 1U, CROSS_SIZE, fp);
+        check(count == CROSS_SIZE &&
+              memcmp(cross_read, cross_written, CROSS_SIZE) == 0,
+              "exact cross-sector read-back");
+        check(fread(buffer, 1U, 1U, fp) == 0U && feof(fp) != 0 &&
+              ferror(fp) == 0, "cross-sector EOF state");
+        check(fclose(fp) == 0, "cross-sector read close");
+    }
+
+    fp = fopen("syslib.txt", "a");
+    check(fp != NULL, "open cross-sector append");
+    if (fp != NULL) {
+        check(ftell(fp) == (long)CROSS_SIZE, "append begins at EOF");
+        check(fwrite(append_marker, 1U, APPEND_SIZE, fp) == APPEND_SIZE,
+              "cross-sector append count");
+        check(fclose(fp) == 0, "append close");
+    }
+
+    fp = fopen("syslib.txt", "r");
+    check(fp != NULL, "reopen appended file");
+    if (fp != NULL) {
+        memset(cross_read, 0, sizeof(cross_read));
+        count = fread(cross_read, 1U, CROSS_SIZE + APPEND_SIZE, fp);
+        check(count == CROSS_SIZE + APPEND_SIZE &&
+              memcmp(cross_read, cross_written,
+                     CROSS_SIZE + APPEND_SIZE) == 0,
+              "append preserves all exact bytes");
+        check(fclose(fp) == 0, "appended read close");
+    }
+
     check(write(1, "", 0) == 0, "console write count");
     check(call_unknown_syscall() == -1, "unknown syscall rejected");
 

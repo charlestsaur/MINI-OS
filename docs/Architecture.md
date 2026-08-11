@@ -21,13 +21,7 @@
 
 - File: `OS_src/kernel/idt.asm`
 - Manages 256-entry IDT table at physical memory `0x00026000`.
-- Implements `int 0x80` system call handler:
-  - `EAX=1` (`sys_exit`): restores kernel Shell ESP from `[saved_kernel_esp]` and returns cleanly to Shell.
-  - `EAX=3` (`sys_read`): reads keyboard input with character echo, backspace handling, and newline detection into buffer.
-  - `EAX=4` (`sys_write`): outputs text buffer to VGA console.
-  - `EAX=12` (`sys_brk`): expands process heap break address between `0x00050000` and `0x00080000` for dynamic memory allocation (`malloc`/`free`).
-  - `EAX=25`: returns the VGA cursor position as `row * 80 + column`, used by
-    application render verification.
+- Implements the `int 0x80` system call handler for console I/O, heap control, filesystem streams, and cursor services. Calls 1, 3--7, 12, 14, 15, and 19--25 are implemented. The complete register, return-value, flag, and error contract is in [`Syscall_ABI.md`](Syscall_ABI.md).
 
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
@@ -55,6 +49,10 @@
 - File: `tools/inject_transport.c`
   
   Host-side C tool that parses MINI-OS filesystem structures and injects the host `transport/` tree at `/transport/` during `make`.
+
+- File: `tools/check_image.c`
+
+  Read-only final-image verifier for inode reachability, directory consistency, FAT chains, allocation ownership, and geometry.
 
 ## Data Model
 

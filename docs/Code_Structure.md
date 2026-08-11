@@ -29,7 +29,7 @@ This document only describes code/file responsibilities.
 
 - `OS_src/kernel/idt.asm`
   - IDT table setup (`lidt`)
-  - `int 0x80` system call gate handler (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
+  - `int 0x80` system call gate handler for calls 1, 3--7, 12, 14, 15, and 19--25; see `docs/Syscall_ABI.md` for the complete contract
 
 ## 5. Driver Layer
 
@@ -53,7 +53,7 @@ This document only describes code/file responsibilities.
 - `OS_src/kernel/fs/ops.asm`: high-level create/remove/rename logic
 - `OS_src/kernel/fs/path_wrappers.asm`: shell-facing path APIs
 - `OS_src/kernel/fs/listing.asm`: `ls` rendering
-- `OS_src/kernel/fs/alloc.asm`: inode/data allocation, inode read/write, bitmap ops
+- `OS_src/kernel/fs/alloc.asm`: inode/FAT-block allocation, inode read/write, inode-bitmap and FAT operations
 - `OS_src/kernel/fs.asm`: filesystem include aggregator
 
 ## 8. Host Tools & User Applications
@@ -63,6 +63,8 @@ This document only describes code/file responsibilities.
   - validates image geometry and FAT chains and propagates mutation failures
 - `tools/elf2bin.c`
   - host C 32-bit ELF linker and flat binary generator
+- `tools/check_image.c`
+  - read-only image geometry, inode, directory, FAT-chain, reachability, and allocation-ownership verifier
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
@@ -70,7 +72,7 @@ This document only describes code/file responsibilities.
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
 - `transport/lib_test/`
-  - strict C90 executable tests, including `test_bss.c`
+  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, and `test_bss.c`
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
@@ -79,4 +81,12 @@ This document only describes code/file responsibilities.
 - `Makefile`
   - source path selection
   - build rules for boot/kernel/image/tool/apps
-  - run and clean targets
+  - mandatory final-image integrity check
+  - run, test, and clean targets
+
+## 10. Automated Test Drivers
+
+- `tests/qemu_e2e.py`
+  - boots a temporary debug image, drives the shell, asserts application and multi-block filesystem behavior, restarts the same image, and checks it
+- `tests/test_build.py`
+  - checks clean and incremental builds, C language policy, dependency edges, checker rejection, and both flat-binary link paths

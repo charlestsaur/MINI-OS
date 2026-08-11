@@ -44,14 +44,18 @@ When writing C code for MINI-OS, adhere strictly to C90 syntax:
 
 ### 2.2 Standard Library Support (`minilibc`)
 
-Applications interact with MINI-OS through standard C headers (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`). The current runtime provides the following API functions:
+Applications use a deliberately limited runtime through familiar C headers.
+
+This is not a complete ANSI C library. The authoritative tested API, formatting conversions, stream behavior, and omissions are listed in [`Library_Support.md`](Library_Support.md).
+
+The main supported groups are:
 
 | Header | Key API Functions & Macros | Description |
 | :--- | :--- | :--- |
 | **`<stdlib.h>`** | `malloc`, `free`, `realloc`, `calloc`, `atoi`, `strtol`, `rand`, `srand`, `qsort`, `bsearch` | Dynamic heap allocation, string parsing, random generation, and sorting |
 | **`<string.h>`** | `strcpy`, `strncpy`, `strcat`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strtok`, `memset`, `memcpy`, `memmove`, `memcmp` | String manipulation and raw memory operations |
 | **`<ctype.h>`** | `isalpha`, `isdigit`, `isalnum`, `isspace`, `islower`, `isupper`, `isprint`, `isgraph`, `ispunct`, `isxdigit`, `toupper`, `tolower` | ASCII character classification and case conversion |
-| **`<stdio.h>`** | `printf`, `sprintf`, `snprintf`, `puts`, `getchar`, `putchar`, `gets`, `fgets`, `write`, `read` | Formatted console output, string formatting, and keyboard input |
+| **`<stdio.h>`** | `printf`, `sprintf`, `snprintf`, `puts`, `getchar`, `putchar`, `fopen`, `fread`, `fwrite`, `fseek`, `fclose` | Formatted console I/O and syscall-backed file streams |
 | **`<limits.h>`** | `INT_MAX`, `INT_MIN`, `CHAR_BIT`, `SHRT_MAX`, `LONG_MAX`, etc. | Data type limits and integer range constants |
 | **`<stddef.h>`** | `size_t`, `ptrdiff_t`, `offsetof`, `NULL` | Standard type definitions and offset macros |
 | **`<assert.h>`** | `assert(expression)` | Runtime assertion testing |
@@ -72,13 +76,16 @@ transport/
 │   ├── hello.c
 │   ├── calc.c
 │   ├── guess.c
-│   └── banner.c
+│   ├── banner.c
+│   └── vedit.c
 ├── lib_test/                <-- Dedicated C Library Test Suites
 │   ├── test_string.c
-│   └── test_heap.c
+│   ├── test_heap.c
+│   ├── test_file.c
+│   └── test_bss.c
 └── build/                   <-- Compiled Output Binaries
     ├── apps/                <-- User App Executables (hello.bin, calc.bin, etc.)
-    └── lib_test/            <-- Test Executables (test_string.bin, test_heap.bin)
+    └── lib_test/            <-- Test Executables for every lib_test source
 ```
 
 ### Writing a User Application (`transport/apps/hello.c`)
@@ -162,6 +169,7 @@ make run
     - guess.bin (f)
     - banner.bin (f)
     - hello.bin (f)
+    - vedit.bin (f)
    ```
 
 3. Run an application:
@@ -219,7 +227,9 @@ sequenceDiagram
 - **Heap**: `0x00050000` through `0x00080000`
 - **Argument Strings / `argv`**: `0x0008E000` through the pointer table at `0x0008E100`
 - **Application Stack**: `0x0008F000` (grows downwards)
-- **System Call Integers**: `sys_exit` = 1, `sys_write` = 4
+- **System Call ABI**: register inputs, return values, flags, and all implemented call numbers are specified in [`Syscall_ABI.md`](Syscall_ABI.md).
+  
+  Applications execute in Ring 0, so the ABI organizes services but provides no pointer or privilege isolation.
 
 The loader clears the full executable region before each run so zero-initialized static storage starts at zero. The flat-binary producer must preserve section placement so every zero-initialized symbol remains inside the 64 KiB application image.
 

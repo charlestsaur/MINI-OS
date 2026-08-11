@@ -2,7 +2,7 @@
 
 Currently, MINI-OS is a very small x86 32-bit pure assembly operating system.
 
-MINI-OS supports running ANSI C90 C programs with dynamic memory allocation (malloc/free) and standard library support, excluding floating-point operations (float/double).
+MINI-OS supports running strict C90 programs with dynamic memory allocation and a documented subset of familiar C library APIs. Floating-point operations are not supported. The runtime implementation itself uses modern C.
 
 > [!NOTE]
 > MINI-OS is only an experimental system and is far from perfect.
@@ -24,10 +24,10 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - VGA text console and polling keyboard input
 - checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write)
 - Custom filesystem with persistent directory tree
-- IDT Interrupt Table & `int 0x80` System Call Engine (`sys_exit`, `sys_read`, `sys_write`, `sys_brk`)
+- IDT Interrupt Table & `int 0x80` System Call Engine for console, heap, file, and cursor services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 64 KiB at `0x00040000`
-- C90 application runtime with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
-- ANSI C90 standard headers (`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, `<assert.h>`)
+- Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
+- Tested API subset exposed through `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, and `<assert.h>`
 - Host-side disk transport tool (`tools/inject_transport.c`) for inject `/transport/` files
 - Built-in shell commands:
   `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `run <file>`, `format`
@@ -36,7 +36,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 
 - `OS_src/boot/`: bootloader sources
 - `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
-- `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`)
+- `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`)
 - `transport/`: host files injected into `/transport/` on disk image
   - `transport/lib/`: modern-C runtime library, `crt0.asm`, and standard C header wrappers
   - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
@@ -48,9 +48,12 @@ The documentation and some comments were written by Gemini and GPT. A small part
 ## Requirements
 
 - `nasm`
-- `cc` / `clang` / `gcc` (host C compiler for `inject_transport` build)
+- `cc` for modern-C host tools
+- `clang` for the freestanding modern-C runtime and strict-C90 apps/tests
+- `ld.lld` when available; otherwise the built-in `elf2bin` path is used
 - `qemu-system-i386`
-- standard shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`)
+- `python3` for automated tests
+- standard shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
 
 ## Build and Run
 
@@ -65,7 +68,11 @@ Build artifacts:
 - `build/boot.bin`
 - `build/kernel.bin`
 - `build/inject_transport`
+- `build/elf2bin`
+- `build/check_image`
 - `build/mini_os.img`
+
+The image target always runs the read-only integrity checker. Run the complete automated suite with `make test`.
 
 ## Quick Usage in Shell
 
@@ -111,13 +118,17 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 - C90 development guide: `docs/C90_Development_Guide.md`
 - Filesystem (current implementation): `docs/Filesystem_Current.md`
 - Filesystem design draft: `docs/DIY-FS.md`
+- Complete system call ABI: `docs/Syscall_ABI.md`
+- Runtime support matrix: `docs/Library_Support.md`
+- Automated testing: `docs/Testing.md`
 - Real hardware boot guide: `docs/Real_Hardware_Guide.md`
 - Known limitations: `docs/Limitations_and_Roadmap.md`
 
 ## Real Hardware Note
 
 > [!CAUTION]
-> MINI-OS uses a very primitive file system implementation and has known flaws (such as aggressive, brute-force disk read/write operations). Therefore, long-term use may increase hardware wear and tear.
+> MINI-OS uses a small experimental filesystem without journaling or crash
+> recovery. It is not intended for valuable or long-term storage.
 >
 > Apart from this, MINI-OS does not perform any destructive operations on the machine. Nevertheless, to prevent potential data loss or hardware damage, it is still recommended to run it on a non-critical machine.
 

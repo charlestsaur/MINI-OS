@@ -7,11 +7,12 @@ This document only covers build, image generation, and local execution.
 Required tools:
 
 - `nasm`
-- `cc` for the two modern-C host tools
+- `cc` for the three modern-C host tools
 - `clang` for the freestanding runtime, applications, and tests
 - `ld.lld` when available; otherwise the checked `elf2bin` fallback is selected
 - `qemu-system-i386`
 - shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
+- `python3` for the automated build and QEMU tests
 
 ## 2. Source and Output Paths
 
@@ -26,6 +27,7 @@ Build outputs:
 - `build/kernel.bin`
 - `build/inject_transport`
 - `build/elf2bin`
+- `build/check_image`
 - `build/mini_os.img`
 - `build/transport/apps/*.o`
 - `build/transport/lib_test/*.o`
@@ -45,15 +47,14 @@ What happens:
 
 1. Build the modern-C host tools and runtime library.
 2. Compile every application and test with strict C90 diagnostics.
-3. Link each flat binary with `ld.lld`, or automatically use `elf2bin` when
-   `ld.lld` is unavailable.
+3. Link each flat binary with `ld.lld`, or automatically use `elf2bin` when `ld.lld` is unavailable.
 4. Assemble the kernel and compute its boot-time sector count.
-5. Create a raw image of exactly 4,471 sectors, derived from the shared
-   `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
-6. Assert the resulting byte size, write boot/kernel sectors, validate the same
-   geometry in the injector, and inject the sorted `transport/` tree.
+5. Create a raw image of exactly 4,471 sectors, derived from the shared `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
+6. Assert the resulting byte size, write boot/kernel sectors, validate the same geometry in the injector, and inject the sorted `transport/` tree.
+7. Run `build/check_image` as a mandatory final step. Any invalid geometry, inode, FAT chain, duplicate ownership, unreachable allocation, or directory inconsistency fails the image build.
 
 Host metadata such as `.DS_Store`, `._*`, `Thumbs.db`, and `.git` is excluded.
+
 An image or host-file I/O failure makes the injector and build return nonzero.
 
 To build one application:
@@ -62,8 +63,7 @@ To build one application:
 make app APP=hello.c
 ```
 
-Objects retain their source path below `build/transport/`, so an application
-and a library test may safely share a basename.
+Objects retain their source path below `build/transport/`, so an application and a library test may safely share a basename.
 
 ## 4. Run in QEMU
 
@@ -111,7 +111,18 @@ Symptom: `make run` fails to launch emulator.
 
 Symptom: image write or cleanup commands fail.
 
-## 8. Real Hardware
+## 8. Verification Targets
+
+```bash
+make check-image  # verify the current generated image
+make test-build   # clean/incremental/language/dependency/linker checks
+make test-e2e     # full QEMU filesystem and persistence regression
+make test         # all automated gates
+```
+
+The QEMU test uses a temporary copy of the image and does not mutate `build/mini_os.img`. Details and asserted behavior are in [`Testing.md`](Testing.md).
+
+## 9. Real Hardware
 
 Physical machine flashing/boot instructions are documented separately in:
 

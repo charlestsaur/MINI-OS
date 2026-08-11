@@ -3,71 +3,81 @@
 #include <ctype.h>
 #include <limits.h>
 
+static int failures = 0;
+
+static void check(int condition, const char *name) {
+    if (!condition) {
+        printf("FAIL: %s\n", name);
+        failures++;
+    }
+}
+
 int main(void) {
-    char buf1[64];
-    char buf2[64];
+    char first[128];
+    char second[128];
+    char overlap[16];
+    char tokens[32];
     char *token;
     int result;
 
-    puts("==========================================");
-    puts("   MINI-OS Phase 1 String & Ctype Test");
-    puts("==========================================");
+    strcpy(first, "MINI-OS");
+    check(strlen(first) == 7U && strcmp(first, "MINI-OS") == 0,
+          "strcpy and strlen");
+    strcat(first, " Runtime");
+    check(strcmp(first, "MINI-OS Runtime") == 0, "strcat and strcmp");
+    check(strncmp(first, "MINI", 4) == 0 && strncmp(first, "MINK", 4) < 0,
+          "strncmp ordering");
+    check(strchr(first, 'R') == first + 8 && strrchr(first, 'I') == first + 3,
+          "strchr and strrchr");
+    check(strstr(first, "Runtime") == first + 8 && strstr(first, "missing") == NULL,
+          "strstr");
 
-    /* 1. Test strcpy & strlen */
-    strcpy(buf1, "MINI-OS");
-    printf("1. strcpy: '%s' (len: %u)\n", buf1, (unsigned int)strlen(buf1));
+    memset(second, 0, sizeof(second));
+    memcpy(second, first, strlen(first) + 1U);
+    check(memcmp(second, first, strlen(first) + 1U) == 0, "memcpy and memcmp");
+    check(memchr(second, ' ', strlen(second)) == second + 7, "memchr");
+    strcpy(overlap, "abcdef");
+    memmove(overlap + 2, overlap, 6U);
+    check(memcmp(overlap, "ababcdef", 8U) == 0, "overlapping memmove");
 
-    /* 2. Test strcat & strcmp */
-    strcat(buf1, " Runtime");
-    printf("2. strcat: '%s'\n", buf1);
-    printf("3. strcmp('MINI-OS Runtime', '%s'): %d\n", buf1, strcmp("MINI-OS Runtime", buf1));
+    check(isalpha('A') && isdigit('5') && isalnum('z') && isspace('\n'),
+          "ctype positive cases");
+    check(!isalpha('5') && !isdigit('x') && ispunct('!') && isxdigit('F'),
+          "ctype negative and punctuation cases");
+    check(tolower('M') == 'm' && toupper('o') == 'O' && iscntrl(127),
+          "ctype conversion and control");
 
-    /* 3. Test strchr & strstr */
-    printf("4. strchr('%s', 'R'): '%s'\n", buf1, strchr(buf1, 'R'));
-    printf("5. strstr('%s', 'Time'): '%s'\n", buf1, strstr(buf1, "Runtime"));
+    strcpy(tokens, "apple,banana,,orange");
+    token = strtok(tokens, ",");
+    check(token != NULL && strcmp(token, "apple") == 0, "strtok token 1");
+    token = strtok(NULL, ",");
+    check(token != NULL && strcmp(token, "banana") == 0, "strtok token 2");
+    token = strtok(NULL, ",");
+    check(token != NULL && strcmp(token, "orange") == 0, "strtok token 3");
+    check(strtok(NULL, ",") == NULL, "strtok terminates");
 
-    /* 4. Test memset & memcpy */
-    memset(buf2, 0, sizeof(buf2));
-    memcpy(buf2, buf1, strlen(buf1));
-    printf("6. memcpy: '%s'\n", buf2);
+    result = sprintf(first, "%c %s %d %i %u %x %p %% %ld %lu %lx",
+                     'Q', "ok", -12, 34, 56U, 0xABU, (void *)0x1234,
+                     -78L, 90UL, 0xCDUL);
+    check(result == 34 &&
+          strcmp(first, "Q ok -12 34 56 ab 1234 % -78 90 cd") == 0,
+          "supported format conversions");
 
-    /* 5. Test ctype functions */
-    printf("7. isalpha('A'): %d, isdigit('5'): %d, isspace(' '): %d\n",
-           isalpha('A'), isdigit('5'), isspace(' '));
-    printf("8. tolower('M'): '%c', toupper('o'): '%c'\n",
-           tolower('M'), toupper('o'));
+    memset(second, 'X', sizeof(second));
+    result = snprintf(second, 5U, "%s", "abcdef");
+    check(result == 6 && strcmp(second, "abcd") == 0 && second[5] == 'X',
+          "bounded snprintf");
+    check(snprintf(NULL, 0U, "abcdef") == 6, "snprintf size zero");
+    snprintf(second, sizeof(second), "%d", INT_MIN);
+    check(strcmp(second, "-2147483648") == 0, "INT_MIN formatting");
+    result = snprintf(second, sizeof(second), "%q");
+    check(result == 2 && strcmp(second, "%q") == 0,
+          "unsupported conversion is emitted literally");
 
-    /* 6. Test strtok */
-    strcpy(buf2, "apple,banana,orange,grape");
-    puts("9. strtok split 'apple,banana,orange,grape':");
-    token = strtok(buf2, ",");
-    while (token != NULL) {
-        printf("   - %s\n", token);
-        token = strtok(NULL, ",");
+    if (failures == 0) {
+        puts("STRING/FORMAT TESTS PASSED");
+        return 0;
     }
-
-    memset(buf2, 'X', sizeof(buf2));
-    result = snprintf(buf2, 5, "%s", "abcdef");
-    if (result != 6 || strcmp(buf2, "abcd") != 0 || buf2[5] != 'X') {
-        puts("FAIL: bounded snprintf");
-        return 1;
-    }
-    if (snprintf(NULL, 0, "abcdef") != 6) {
-        puts("FAIL: snprintf size zero");
-        return 1;
-    }
-    snprintf(buf2, sizeof(buf2), "%d", INT_MIN);
-    if (strcmp(buf2, "-2147483648") != 0) {
-        puts("FAIL: INT_MIN formatting");
-        return 1;
-    }
-    result = printf("10. printf count probe");
-    if (result != 22) {
-        puts("\nFAIL: printf return value");
-        return 1;
-    }
-    putchar('\n');
-
-    puts("STRING/FORMAT TESTS PASSED");
-    return 0;
+    printf("STRING/FORMAT FAILURES: %d\n", failures);
+    return 1;
 }

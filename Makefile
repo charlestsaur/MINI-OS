@@ -14,6 +14,7 @@ OS_IMG := $(BUILD_DIR)/mini_os.img
 
 INJECT_TOOL := $(BUILD_DIR)/inject_transport
 ELF2BIN_TOOL := $(BUILD_DIR)/elf2bin
+CHECK_TOOL := $(BUILD_DIR)/check_image
 
 LIB_DIR := transport/lib
 APPS_DIR := transport/apps
@@ -37,6 +38,7 @@ CC := cc
 CLANG := clang
 LLD := ld.lld
 QEMU := qemu-system-i386
+PYTHON := python3
 
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
@@ -44,7 +46,7 @@ APP_CFLAGS := $(TARGET_CFLAGS) -std=c90 -pedantic-errors -Wall -Wextra -Werror
 HOST_CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror
 MAX_APP_IMAGE_SIZE := 65536
 
-.PHONY: all clean run apps app
+.PHONY: all clean run apps app check-image test test-build test-e2e
 
 all: $(OS_IMG)
 
@@ -59,6 +61,9 @@ $(INJECT_TOOL): tools/inject_transport.c $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR
 
 $(ELF2BIN_TOOL): tools/elf2bin.c Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/elf2bin.c -o $(ELF2BIN_TOOL)
+
+$(CHECK_TOOL): tools/check_image.c $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) tools/check_image.c -o $(CHECK_TOOL)
 
 $(CRT0_OBJ): $(CRT0_SRC) Makefile | $(BUILD_DIR)
 	$(NASM) -f elf32 $(CRT0_SRC) -o $(CRT0_OBJ)
@@ -114,7 +119,7 @@ $(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) Makefile | $(BUILD_DIR)
 	fi; \
 	$(NASM) -f bin -d KERNEL_SECTORS=$$KERNEL_SECTORS $(BOOT_SRC) -o $(BOOT_BIN)
 
-$(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(APP_BINS) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+$(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(CHECK_TOOL) $(APP_BINS) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	dd if=/dev/zero of=$(OS_IMG) bs=512 count=$(OS_SECTORS)
 	@IMAGE_SIZE=$$(wc -c < $(OS_IMG)); \
 	EXPECTED_SIZE=$$(( $(OS_SECTORS) * 512 )); \
@@ -125,6 +130,18 @@ $(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(APP_BINS) $(FS_LAYOUT_DEF)
 	dd if=$(BOOT_BIN) of=$(OS_IMG) bs=512 seek=0 conv=notrunc
 	dd if=$(KERNEL_BIN) of=$(OS_IMG) bs=512 seek=1 conv=notrunc
 	$(INJECT_TOOL) $(OS_IMG) transport
+	$(CHECK_TOOL) $(OS_IMG)
+
+check-image: $(OS_IMG) $(CHECK_TOOL)
+	$(CHECK_TOOL) $(OS_IMG)
+
+test-build:
+	$(PYTHON) tests/test_build.py
+
+test-e2e: $(OS_IMG) $(CHECK_TOOL)
+	$(PYTHON) tests/qemu_e2e.py --image $(OS_IMG) --checker $(CHECK_TOOL)
+
+test: test-build test-e2e
 
 run: $(OS_IMG)
 	$(QEMU) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk

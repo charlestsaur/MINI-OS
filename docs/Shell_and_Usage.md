@@ -117,7 +117,7 @@ Loads and executes a raw binary application from disk.
 - saves kernel Shell stack pointer in `[saved_kernel_esp]`
 - sets application stack pointer `esp = 0x0008F000`
 - jumps to `0x00040000`
-- user application executes and invokes system calls via `int 0x80` (`sys_exit`, `sys_write`)
+- trusted Ring 0 application executes in the kernel address space and invokes services via `int 0x80`; the complete ABI is in `docs/Syscall_ABI.md`
 - upon `sys_exit` (`int 0x80`, `eax=1`), kernel restores `[saved_kernel_esp]` and cleanly returns to Shell prompt
 
 ### `format`

@@ -21,7 +21,7 @@ graph TD
     F --> G[Kernel: Initialize VGA 0xB8000 & Hardware Cursor]
     G --> H[Kernel: FS Bootstrap]
     H --> I{Superblock @ LBA 101 Valid?}
-    I -- No --> J[fs_format: Wipe Bitmaps/Inodes/Data]
+    I -- No --> J[fs_format: Reset Inode Bitmap, FAT, and Inode Table;<br/>Create Root and README]
     I -- Yes --> K[Validate Root Inode @ Index 0]
     K -- Invalid --> J
     K -- Valid --> L[Set CWD Inode = 0]
@@ -105,7 +105,7 @@ graph TD
     H -- Success --> I[Write 32-byte Dir Entry to Parent Data Block]
     H -- Full --> J[fs_expand_dir: Alloc new data block]
     J --> I
-    I --> K[fs_write_inode: Commit to LBA 111+]
+    I --> K[fs_write_inode: Commit to LBA 119+]
     K --> L[Return 0 Success]
 ```
 
@@ -143,7 +143,7 @@ graph TD
     E -- Not Empty --> F[Return -2 Not Empty]
     E -- Empty --> G[Proceed]
     D -- No --> G
-    G --> H[fs_free_inode_data_blocks: Scan Data Bitmap LBA 103-110]
+    G --> H[fs_free_inode_data_blocks:<br/>Validate and Clear FAT Chain LBA 103-118]
     H --> I[Clear Inode Bitmap bit]
     I --> J[Zero Inode Entry on disk]
     J --> K[Clear Dir Entry in Parent]
@@ -171,13 +171,15 @@ graph TD
 
 ## 8. File Editing (`edit`)
 
-Single-sector text I/O flow.
+The shell editor accepts at most 510 bytes and therefore writes at most one
+data block. General file I/O through the syscall ABI supports multi-block FAT
+chains.
 
 ```mermaid
 graph TD
     A[Resolve File Inode] --> B[kbd_read_text: Polling for ESC]
     B --> C{Has Data Block?}
-    C -- No --> D[fs_alloc_data_block: Update Bitmap & Inode]
+    C -- No --> D[fs_alloc_data_block: Allocate FAT Entry & Update Inode]
     C -- Yes --> E[Prepare 512-byte Sector Buffer]
     D --> E
     E --> F[Copy Input to Buffer]

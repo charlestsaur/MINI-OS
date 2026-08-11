@@ -1,96 +1,53 @@
-# 32-bit Assembly OS: DIY File System Design Spec
+# MINI-OS Filesystem Format Notes
 
-## 1 Disk Layout
+This file explains the implementation choices behind the current format. Exact
+numeric values come from `OS_src/kernel/fs/layout.def`; the complete current
+contract is documented in `docs/Filesystem_Current.md`.
 
-Assume standard **LBA mode** with **512-byte sectors**.
+## Metadata Regions
 
-| Start LBA | Region | Length | Description |
-| --- | --- | --- | --- |
-| `0` | Bootloader | 1 sector | 16-bit real-mode code that loads the kernel and switches to 32-bit mode. |
-| `1` | Kernel image | 100 sectors (reserved) | 32-bit kernel binary area. |
-| `101` | Superblock | 1 sector | Global file system metadata. |
-| `102` | Inode bitmap | 1 sector | Bitmap for inode allocation status. |
-| `103` | Data bitmap | 8 sectors | Bitmap for data-block allocation status. |
-| `111` | Inode array | 256 sectors | Inode metadata table. |
-| `367+` | Data blocks | Remaining sectors | File payload blocks (text content). |
+The image reserves LBA 0 for the boot sector and LBA 1..100 for the kernel.
+Filesystem metadata begins at LBA 101:
 
-Capacity note:
+| Start LBA | Region | Length |
+| ---: | --- | ---: |
+| 101 | Superblock | 1 sector |
+| 102 | Inode bitmap | 1 sector |
+| 103 | FAT | 16 sectors |
+| 119 | Inode table | 256 sectors |
+| 375 | Data blocks | 4,096 sectors |
 
-- Inode bitmap size is 512 bytes = 4096 bits.
-- Inode array size is 256 sectors * 512 bytes / 64 bytes = **2048 inodes**.
-- Effective inode capacity should therefore be **2048** unless the inode array is expanded.
+The inode bitmap and inode table both describe exactly 2,048 inodes. The FAT contains one 16-bit entry for each of the 4,096 data blocks.
 
-## 2 Core Data Structures (NASM style)
+## Linked Allocation
 
-### 2.1 Superblock
+Files and directories are not required to occupy contiguous blocks. Allocation selects a free FAT entry, marks it `0xFFFF`, and links it from the previous tail when extending an existing chain. Traversal is bounded by the inode's declared block count and rejects out-of-range values, cycles, early end markers, and a final entry other than `0xFFFF`.
 
-```nasm
-struc Superblock
-    .magic           resd 1    ; For example 0x534F5359 ("SOSY")
-    .inode_count     resd 1    ; Total inode count
-    .data_blk_count  resd 1    ; Total data block count
-    .inode_start_lba resd 1    ; Inode array start sector
-    .data_start_lba  resd 1    ; Data area start sector
-    .root_inode      resd 1    ; Root directory inode index
-endstruc
-```
+Freeing validates the complete chain before clearing its FAT entries. Directory growth allocates a new cleared block, links it to the previous tail, and then updates the directory inode's block count.
 
-### 2.2 Inode (64 bytes)
+## Directory and Path Model
 
-```nasm
-struc Inode
-    .type        resb 1        ; 0=free, 1=file, 2=directory
-    .name        resb 27       ; File or directory name
-    .size        resd 1        ; File size in bytes
-    .start_block resd 1        ; First data block LBA
-    .blocks_cnt  resd 1        ; Number of occupied blocks
-    .parent      resd 1        ; Parent inode index (root points to itself)
-    .reserved    resb 22       ; Padding to 64-byte alignment
-endstruc
-```
+Directory blocks contain 16 fixed-size entries mapping a name to a child inode.
 
-## 3 Critical Low-Level Interface: ATA PIO
+The child inode repeats its name, type, and parent; mutations keep these fields consistent.
 
-The current protected-mode implementation uses the primary ATA channel's master device directly; it does not discover or translate the BIOS boot-drive number.
+Path resolution starts at root for `/...` and at the current working directory otherwise, then resolves each component through directory entries.
 
-Minimal read flow (`LBA28`, one sector):
+## ATA Interface
 
-1. Reject an LBA outside the 28-bit range.
-2. Wait with a fixed iteration limit until BSY=0, failing on timeout, ERR, or DF.
-3. Program sector count (`0x1F2` = 1).
-4. Program LBA low/mid/high (`0x1F3..0x1F5`).
-5. Program drive/head (`0x1F6`) with `0xE0 | (lba>>24 & 0x0F)`.
-6. Send command `0x20` to `0x1F7`.
-7. Poll with the same bounded error checks until DRQ=1.
-8. Read 256 words from `0x1F0` (`rep insw`) and check final completion status.
+Protected-mode storage currently addresses the primary ATA channel's master device with LBA28 PIO. Each one-sector transfer:
 
-Write flow is identical, except command `0x30`, data transfer uses `rep outsw`, and cache flush completion is also checked. Both helpers return carry clear on success and carry set on any device error or timeout; callers must propagate it.
+1. rejects an address outside LBA28;
+2. waits with a fixed bound for BSY to clear;
+3. fails on timeout, ERR, or DF;
+4. programs sector count, LBA, drive/head, and command;
+5. waits for DRQ before transferring 256 words;
+6. checks completion status, including cache-flush completion for writes.
 
-## 4 File Editor and File System Interaction
+The helper returns carry clear on success and carry set on failure.
 
-### 4.1 Save file (`save_file`)
+Filesystem callers translate this into `FS_ERR_IO` and do not continue with invalid data.
 
-1. Scan inode bitmap for a free inode bit.
-2. Scan data bitmap for enough free blocks.
-3. Fill inode metadata in memory.
-4. Commit changes:
-   - Write text payload to allocated data blocks.
-   - Write inode entry into inode array.
-   - Update inode/data bitmaps.
+## Validation Rule
 
-### 4.2 List file tree (`ls`)
-
-1. Traverse inode array.
-2. Check inode `.type`.
-3. If `.type` is file or directory, print `.name`.
-
-Hierarchical paths are implemented with:
-
-1. Directory entry blocks (name -> inode).
-2. Inode `.parent` pointers for `..`, `pwd`, and move validation.
-
-## 5 Implementation Guidance
-
-1. Keep constants centralized and use strict sector-based APIs (`read_sector`, `write_sector`).
-2. Validate `magic` on boot; if invalid, run `format`.
-3. Use QEMU/Bochs first; avoid testing on physical storage during early development.
+New format changes must update `layout.def` first and preserve agreement among the kernel, `inject_transport`, `check_image`, the Makefile geometry assertion, and the public documentation. A successful `make test` is required after any metadata or allocation change.

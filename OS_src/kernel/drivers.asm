@@ -753,6 +753,11 @@ vga_putc:
     push edx
     push edi
 
+%ifdef ENABLE_DEBUGCON
+    mov dx, 0xE9
+    out dx, al
+%endif
+
     cmp al, 10
     je near .newline
     cmp al, 8
