@@ -55,7 +55,9 @@ static int name_valid(const char *name) {
 
     if (name == NULL) return 0;
     length = strlen(name);
-    return length > 0U && length < INODE_NAME_CAP;
+    return length > 0U && length < INODE_NAME_CAP &&
+           strcmp(name, ".") != 0 && strcmp(name, "..") != 0 &&
+           strchr(name, '/') == NULL;
 }
 
 static int checked_seek(FILE *fp, uint64_t offset, const char *what) {
@@ -545,7 +547,7 @@ static int inject_host_file(uint32_t parent_index, const char *host_path,
     int host_error;
 
     if (!name_valid(fs_name)) {
-        fprintf(stderr, "Error: filesystem name '%s' exceeds 26 bytes.\n", fs_name);
+        fprintf(stderr, "Error: invalid filesystem name '%s'.\n", fs_name);
         return -1;
     }
     found = find_child(parent_index, fs_name, &existing, &existing_type);
@@ -659,7 +661,7 @@ static int process_directory_tree(uint32_t target_inode, const char *host_path) 
     for (i = 0; i < count; i++) {
         if (result == 0 && !skip_host_metadata(entries[i]->d_name)) {
             if (!name_valid(entries[i]->d_name)) {
-                fprintf(stderr, "Error: host name '%s' exceeds 26 bytes.\n", entries[i]->d_name);
+                fprintf(stderr, "Error: invalid host name '%s'.\n", entries[i]->d_name);
                 result = -1;
             } else if (snprintf(full_path, sizeof(full_path), "%s/%s", host_path,
                                 entries[i]->d_name) >= (int)sizeof(full_path)) {
@@ -811,7 +813,8 @@ int main(int argc, char **argv) {
     host_directory = argv[2];
     target_name = argc == 4 ? argv[3] : path_basename(host_directory);
     if (!name_valid(target_name)) {
-        fprintf(stderr, "Error: target directory name must contain 1..26 bytes.\n");
+        fprintf(stderr,
+                "Error: target directory name must contain 1..26 bytes and cannot be '.', '..', or contain '/'.\n");
         return 1;
     }
 

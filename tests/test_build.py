@@ -13,6 +13,14 @@ import tempfile
 import time
 
 
+SECTOR_SIZE = 512
+FAT_LBA = 103
+INODE_START_LBA = 119
+DATA_START_LBA = 375
+INODE_SIZE = 64
+INODE_NAME_CAP = 27
+
+
 def run(command: list[str], cwd: Path, expect_success: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
     if expect_success and result.returncode != 0:
@@ -70,13 +78,127 @@ def smoke(repo: Path) -> None:
     )
 
 
-def reject_corrupt_image(repo: Path) -> None:
-    corrupt = repo / "build/corrupt.img"
-    shutil.copyfile(repo / "build/mini_os.img", corrupt)
+def expect_checker_failure(repo: Path, image: Path) -> None:
+    run(["build/check_image", str(image)], repo, expect_success=False)
+
+
+def reject_corrupt_images(repo: Path) -> None:
+    source = repo / "build/mini_os.img"
+    corrupt = repo / "build/corrupt-fat.img"
+    shutil.copyfile(source, corrupt)
     with corrupt.open("r+b") as image:
-        image.seek(103 * 512 + 2 * 2)
+        image.seek(FAT_LBA * SECTOR_SIZE + 2 * 2)
         image.write(struct.pack("<H", 2))
-    run(["build/check_image", str(corrupt)], repo, expect_success=False)
+    expect_checker_failure(repo, corrupt)
+
+    for value, label in ((4096 * SECTOR_SIZE + 1, "capacity"),
+                         (0xFFFFFFFF, "uint32")):
+        corrupt = repo / f"build/corrupt-size-{label}.img"
+        shutil.copyfile(source, corrupt)
+        inode_offset = INODE_START_LBA * SECTOR_SIZE + INODE_SIZE
+        with corrupt.open("r+b") as image:
+            image.seek(inode_offset + 32)
+            start_block = struct.unpack("<I", image.read(4))[0]
+            image.seek(FAT_LBA * SECTOR_SIZE + start_block * 2)
+            image.write(struct.pack("<H", 0))
+            image.seek(inode_offset + 28)
+            image.write(struct.pack("<III", value, 0, 0))
+        expect_checker_failure(repo, corrupt)
+
+    corrupt = repo / "build/corrupt-reserved-name.img"
+    shutil.copyfile(source, corrupt)
+    inode_offset = INODE_START_LBA * SECTOR_SIZE + INODE_SIZE
+    with corrupt.open("r+b") as image:
+        image.seek(INODE_START_LBA * SECTOR_SIZE + 32)
+        root_block = struct.unpack("<I", image.read(4))[0]
+        invalid_name = b".\0" + b"\0" * (INODE_NAME_CAP - 2)
+        image.seek(inode_offset + 1)
+        image.write(invalid_name)
+        image.seek((DATA_START_LBA + root_block) * SECTOR_SIZE + 5)
+        image.write(invalid_name)
+    expect_checker_failure(repo, corrupt)
+
+
+def reject_reserved_injector_names(repo: Path) -> None:
+    source = repo / "build/mini_os.img"
+    for index, name in enumerate((".", "..", "bad/name")):
+        image = repo / f"build/inject-invalid-{index}.img"
+        shutil.copyfile(source, image)
+        run(
+            ["build/inject_transport", str(image), "transport", name],
+            repo,
+            expect_success=False,
+        )
+        run(["build/check_image", str(image)], repo)
+
+
+def compile_elf_probe(repo: Path, source: Path, output: Path) -> None:
+    run(
+        [
+            "clang",
+            "-target",
+            "i386-unknown-none-elf",
+            "-m32",
+            "-march=i386",
+            "-ffreestanding",
+            "-nostdlib",
+            "-O0",
+            "-c",
+            str(source),
+            "-o",
+            str(output),
+        ],
+        repo,
+    )
+
+
+def reject_invalid_elf_inputs(repo: Path) -> None:
+    elf2bin = "build/elf2bin"
+    output = repo / "build/rejected.bin"
+    truncated = repo / "build/truncated.o"
+    truncated.write_bytes(b"\x7fELF")
+    run([elf2bin, str(output), "0x40000", str(truncated)], repo,
+        expect_success=False)
+
+    invalid_offset = repo / "build/invalid-section-offset.o"
+    shutil.copyfile(repo / "build/crt0.o", invalid_offset)
+    with invalid_offset.open("r+b") as stream:
+        stream.seek(32)
+        stream.write(struct.pack("<I", 0xFFFFFFF0))
+    run([elf2bin, str(output), "0x40000", str(invalid_offset)], repo,
+        expect_success=False)
+
+    undefined_source = repo / "build/undefined.c"
+    undefined_object = repo / "build/undefined.o"
+    undefined_source.write_text(
+        "extern void missing_symbol(void);\n"
+        "void undefined_probe(void) { missing_symbol(); }\n",
+        encoding="utf-8",
+    )
+    compile_elf_probe(repo, undefined_source, undefined_object)
+    run([elf2bin, str(output), "0x40000", str(undefined_object)], repo,
+        expect_success=False)
+
+    duplicate_objects = []
+    for index in range(2):
+        duplicate_source = repo / f"build/duplicate-{index}.c"
+        duplicate_object = repo / f"build/duplicate-{index}.o"
+        duplicate_source.write_text(
+            f"int duplicate_symbol = {index + 1};\n", encoding="utf-8"
+        )
+        compile_elf_probe(repo, duplicate_source, duplicate_object)
+        duplicate_objects.append(str(duplicate_object))
+    run([elf2bin, str(output), "0x40000", *duplicate_objects], repo,
+        expect_success=False)
+
+    overflow_source = repo / "build/output-overflow.c"
+    overflow_object = repo / "build/output-overflow.o"
+    overflow_source.write_text(
+        "unsigned char oversized_output[524289] = { 1 };\n", encoding="utf-8"
+    )
+    compile_elf_probe(repo, overflow_source, overflow_object)
+    run([elf2bin, str(output), "0x40000", str(overflow_object)], repo,
+        expect_success=False)
 
 
 def main() -> int:
@@ -93,7 +215,9 @@ def main() -> int:
         if "-std=c90" not in output or "-pedantic-errors" not in output:
             raise RuntimeError("applications were not compiled with strict C90 diagnostics")
         run(["build/check_image", "build/mini_os.img"], repo)
-        reject_corrupt_image(repo)
+        reject_corrupt_images(repo)
+        reject_reserved_injector_names(repo)
+        reject_invalid_elf_inputs(repo)
         smoke(repo)
 
         probe = repo / "transport/apps/c99_probe.c"

@@ -49,7 +49,7 @@ fs_validate_child_path:
     cmp byte [esi + edx], 0
     je .child_len_done
     inc edx
-    cmp edx, DIR_ENTRY_NAME_LEN
+    cmp edx, FS_NAME_MAX
     ja .too_long
     jmp .child_len
 .child_len_done:
@@ -277,7 +277,7 @@ fs_resolve_path:
     cmp byte [esi], 0
     je .finish
     mov edi, PATH_PART_BUF
-    mov ecx, DIR_ENTRY_NAME_LEN
+    mov ecx, FS_NAME_MAX
 
 .copy_component:
     mov dl, [esi]
@@ -496,7 +496,7 @@ fs_split_parent_name:
 .copy_name:
     cmp ecx, 1
     jl .invalid
-    cmp ecx, DIR_ENTRY_NAME_LEN
+    cmp ecx, FS_NAME_MAX
     ja .invalid
     mov [tmp_parent_inode], eax
     mov edi, PATH_NAME_BUF
@@ -551,7 +551,7 @@ fs_validate_name:
     cmp al, '/'
     je .bad
     inc ecx
-    cmp ecx, DIR_ENTRY_NAME_LEN
+    cmp ecx, FS_NAME_MAX
     ja .bad
     jmp .scan
 

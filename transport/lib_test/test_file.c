@@ -72,9 +72,12 @@ int main(void) {
         check(feof(fp) != 0 && ferror(fp) == 0, "short read sets only EOF");
         check(fseek(fp, 0, SEEK_SET) == 0 && feof(fp) == 0,
               "seek clears EOF");
+        check(fflush(fp) == 0, "unbuffered stream flush");
         check(fseek(fp, -1, SEEK_SET) < 0, "negative seek rejected");
         check(fseek(fp, LONG_MAX, SEEK_END) < 0,
               "overflowing seek rejected");
+        rewind(fp);
+        check(ftell(fp) == 0L && feof(fp) == 0, "rewind resets position and EOF");
         fclose(fp);
     }
 
@@ -118,6 +121,7 @@ int main(void) {
 
     check(fopen("syslib.txt", "bad") == NULL, "invalid mode rejected");
     check(fopen("syslib.txt", "r++") == NULL, "duplicate plus mode rejected");
+    check(fflush(NULL) == 0, "NULL accepted by no-op flush");
 
     for (i = 0U; i < CROSS_SIZE; i++) {
         cross_written[i] = (unsigned char)('a' + (i % 26U));

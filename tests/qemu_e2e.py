@@ -22,7 +22,9 @@ def run_checked(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
-def prepare_debug_image(repo: Path, source: Path, destination: Path) -> None:
+def prepare_debug_image(
+    repo: Path, source: Path, destination: Path, force_chs: bool = False
+) -> None:
     kernel = destination.with_suffix(".kernel.bin")
     boot = destination.with_suffix(".boot.bin")
     run_checked(
@@ -43,20 +45,16 @@ def prepare_debug_image(repo: Path, source: Path, destination: Path) -> None:
     sectors = (len(kernel_bytes) + 511) // 512
     if sectors > 100:
         raise RuntimeError("debug kernel exceeds the 100-sector boot reservation")
-    run_checked(
-        [
-            "nasm",
-            "-w-label-redef-late",
-            "-d",
-            f"KERNEL_SECTORS={sectors}",
-            "-f",
-            "bin",
-            "OS_src/boot/boot.asm",
-            "-o",
-            str(boot),
-        ],
-        repo,
-    )
+    boot_command = [
+        "nasm",
+        "-w-label-redef-late",
+        "-d",
+        f"KERNEL_SECTORS={sectors}",
+    ]
+    if force_chs:
+        boot_command.extend(["-d", "BOOT_FORCE_CHS=1"])
+    boot_command.extend(["-f", "bin", "OS_src/boot/boot.asm", "-o", str(boot)])
+    run_checked(boot_command, repo)
     boot_bytes = boot.read_bytes()
     if len(boot_bytes) != 512 or boot_bytes[510:] != b"\x55\xaa":
         raise RuntimeError("debug boot sector has an invalid size or signature")
@@ -137,6 +135,8 @@ class VirtualMachine:
     def key_name(character: str) -> str:
         if character.isascii() and (character.islower() or character.isdigit()):
             return character
+        if character.isascii() and character.isupper():
+            return "shift-" + character.lower()
         mapping = {
             " ": "spc",
             "/": "slash",
@@ -203,6 +203,68 @@ def smoke_test(vm: VirtualMachine) -> None:
     vm.command_expect("pwd", "/ > ")
 
 
+def filesystem_boundary_test(vm: VirtualMachine) -> None:
+    name_26 = "abcdefghijklmnopqrstuvwxyz"
+    name_27 = "abcdefghijklmnopqrstuvwxyza"
+
+    vm.command_expect("vedit test", "vedit render test: PASS")
+    vm.command_expect("touch " + name_26, "Created: " + name_26)
+    vm.command_expect("touch " + name_27, "Invalid path or name.")
+    vm.command_expect("rm " + name_26, "Removed.")
+
+    vm.command_expect("mkdir many", "Directory created: many")
+    vm.command_expect("cd many", "/many > ")
+    for index in range(17):
+        name = f"f{index:02d}"
+        vm.command_expect("touch " + name, "Created: " + name)
+    vm.command_expect("mv f16 z16", "Renamed.")
+    vm.command_expect("ls", "z16 (f)")
+    for index in range(16):
+        vm.command_expect(f"rm f{index:02d}", "Removed.")
+    vm.command_expect("rm z16", "Removed.")
+    vm.command_expect("cd /", "/ > ")
+    vm.command_expect("rm many", "Removed.")
+
+    vm.command_expect("mkdir CaseDir", "Directory created: CaseDir")
+    vm.command_expect("mv CaseDir cASEdIR", "Renamed.")
+    vm.command_expect("cd casedir", "/cASEdIR > ")
+    vm.command_expect(
+        "rm /casedir", "Cannot remove root, current directory, or its ancestor."
+    )
+    vm.command_expect("mkdir child", "Directory created: child")
+    vm.command_expect("cd child", "/cASEdIR/child > ")
+    vm.command_expect(
+        "rm /casedir", "Cannot remove root, current directory, or its ancestor."
+    )
+    vm.command_expect("mv /casedir /Moved", "Renamed.")
+    vm.command_expect("pwd", "/Moved/child")
+    vm.command_expect("cd /", "/ > ")
+    vm.command_expect("rm /Moved/child", "Removed.")
+    vm.command_expect("rm /Moved", "Removed.")
+
+    vm.command_expect("touch slashfile", "Created: slashfile")
+    vm.command_expect("cat slashfile/", "Target is not a directory.")
+    vm.command_expect("rm slashfile/", "Invalid path or name.")
+    vm.command_expect(
+        "rm /", "Cannot remove root, current directory, or its ancestor."
+    )
+    vm.command_expect("rm slashfile", "Removed.")
+
+
+def forced_chs_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "mini_os_chs.img"
+    prepare_debug_image(repo, source, image, force_chs=True)
+    vm = VirtualMachine(image, temp / "session-chs.log", qemu, -1)
+    try:
+        vm.start()
+        vm.command_expect("pwd", "/ > ")
+    finally:
+        vm.stop()
+    check_image(checker, image, repo)
+
+
 def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> None:
     first = VirtualMachine(image, temp / "session-1.log", qemu, 1)
     try:
@@ -221,6 +283,7 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
             "run /transport/build/lib_test/test_file.bin",
             "SYSCALL/STREAM TESTS PASSED",
         )
+        filesystem_boundary_test(first)
         segment = first.command_expect("cat syslib.txt", "E2E-APPEND")
         if "E2E-BEGIN" not in segment or "E2E-END" not in segment:
             raise RuntimeError("cross-sector file markers were not all read back")
@@ -281,8 +344,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mini-os-e2e-") as directory:
         temp = Path(directory)
         debug_image = temp / "mini_os_debug.img"
-        prepare_debug_image(repo, source_image, debug_image)
         if args.smoke:
+            prepare_debug_image(repo, source_image, debug_image)
             vm = VirtualMachine(debug_image, temp / "smoke.log", args.qemu, 0)
             try:
                 vm.start()
@@ -291,6 +354,8 @@ def main() -> int:
                 vm.stop()
             check_image(checker, debug_image, repo)
         else:
+            forced_chs_test(repo, checker, source_image, args.qemu, temp)
+            prepare_debug_image(repo, source_image, debug_image)
             full_test(repo, checker, debug_image, args.qemu, temp)
 
     print("QEMU filesystem regression: PASS")

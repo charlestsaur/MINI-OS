@@ -15,6 +15,7 @@
 #undef FS_LAYOUT_CONST
 
 #define FS_TOTAL_SECTORS ((uint64_t)FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT)
+#define FS_MAX_FILE_SIZE ((uint64_t)FS_DATA_BLOCK_COUNT * SECTOR_SIZE)
 
 #pragma pack(push, 1)
 typedef struct {
@@ -88,6 +89,12 @@ static int block_valid(uint32_t block) {
 
 static int field_is_terminated(const char field[INODE_NAME_CAP]) {
     return memchr(field, '\0', INODE_NAME_CAP) != NULL;
+}
+
+static int name_valid(const char field[INODE_NAME_CAP]) {
+    if (!field_is_terminated(field) || field[0] == '\0') return 0;
+    return strcmp(field, ".") != 0 && strcmp(field, "..") != 0 &&
+           strchr(field, '/') == NULL;
 }
 
 static unsigned char ascii_fold(unsigned char value) {
@@ -200,7 +207,7 @@ static int validate_inodes_and_fat(void) {
                 return fail("root inode shape is invalid");
             }
         } else {
-            if (inode->name[0] == '\0' || inode->parent >= FS_INODE_COUNT) {
+            if (!name_valid(inode->name) || inode->parent >= FS_INODE_COUNT) {
                 return fail_index("inode name or parent is invalid:", i);
             }
         }
@@ -214,7 +221,11 @@ static int validate_inodes_and_fat(void) {
                 return fail_index("empty file retains more than one block:", i);
             }
         } else {
-            expected_blocks = (inode->size + SECTOR_SIZE - 1U) / SECTOR_SIZE;
+            if ((uint64_t)inode->size > FS_MAX_FILE_SIZE) {
+                return fail_index("file size exceeds filesystem capacity:", i);
+            }
+            expected_blocks = (uint32_t)(((uint64_t)inode->size +
+                                          SECTOR_SIZE - 1U) / SECTOR_SIZE);
             if (inode->blocks_cnt != expected_blocks) {
                 return fail_index("file block count does not match byte size:", i);
             }
@@ -287,7 +298,7 @@ static int walk_directory(uint32_t inode_index) {
             if (child >= FS_INODE_COUNT || !bitmap_is_set(child)) {
                 return fail_index("directory references an unallocated inode:", child);
             }
-            if (!field_is_terminated(entry->child_name) || entry->child_name[0] == '\0') {
+            if (!name_valid(entry->child_name)) {
                 return fail_index("directory entry has an invalid name in inode:", inode_index);
             }
             for (i = 0; i < seen_count; i++) {

@@ -17,6 +17,7 @@ int main(void) {
     char second[128];
     char overlap[16];
     char tokens[32];
+    char bounded[8];
     char *token;
     int result;
 
@@ -25,6 +26,13 @@ int main(void) {
           "strcpy and strlen");
     strcat(first, " Runtime");
     check(strcmp(first, "MINI-OS Runtime") == 0, "strcat and strcmp");
+    memset(bounded, 'X', sizeof(bounded));
+    strncpy(bounded, "abc", 5U);
+    check(memcmp(bounded, "abc\0\0", 5U) == 0 && bounded[5] == 'X',
+          "strncpy padding");
+    strcpy(bounded, "ab");
+    strncat(bounded, "cdef", 2U);
+    check(strcmp(bounded, "abcd") == 0, "strncat bound");
     check(strncmp(first, "MINI", 4) == 0 && strncmp(first, "MINK", 4) < 0,
           "strncmp ordering");
     check(strchr(first, 'R') == first + 8 && strrchr(first, 'I') == first + 3,
@@ -46,6 +54,8 @@ int main(void) {
           "ctype negative and punctuation cases");
     check(tolower('M') == 'm' && toupper('o') == 'O' && iscntrl(127),
           "ctype conversion and control");
+    check(islower('z') && isupper('A') && isprint(' ') && !isgraph(' ') &&
+          isgraph('!'), "ctype case and printable classes");
 
     strcpy(tokens, "apple,banana,,orange");
     token = strtok(tokens, ",");

@@ -22,7 +22,8 @@ Tests require Python 3 and `qemu-system-i386` in addition to the normal build to
 - exact, bounded, acyclic FAT chains;
 - one owner per allocated data block and no orphan FAT allocation;
 - root reachability and exactly one parent link for every other inode;
-- directory name uniqueness and entry/inode agreement;
+- NUL-terminated names of at most 26 visible bytes, reserved-name and slash rejection, directory name uniqueness, and entry/inode agreement;
+- file-size/block-count agreement without arithmetic wraparound;
 - all metadata and data references within image bounds.
 
 Any failure terminates the image build.
@@ -35,9 +36,12 @@ It boots and asserts:
 
 1. exact string, formatting, heap, BSS, syscall, and stream test results;
 2. creation, truncation, exact multi-sector write/read, gap zeroing, and append;
-3. `cat`, directory creation, cross-directory move, listing, and removal;
-4. persistence of bytes, moves, and removals across complete QEMU restarts;
-5. image integrity before remount, after cleanup, and after the final remount.
+3. 26/27-byte name boundaries and trailing-slash/root rejection;
+4. two-block directory growth, rename, listing, removal, and cleanup;
+5. current-directory/ancestor removal protection, case-only rename, and CWD refresh after moving an ancestor;
+6. the `vedit test` screen rendering path and a separately built forced-CHS boot;
+7. persistence of bytes, moves, and removals across complete QEMU restarts;
+8. image integrity before remount, after cleanup, and after the final remount.
 
 ## Build Regression
 
@@ -46,7 +50,9 @@ It boots and asserts:
 - a clean default build and mandatory image verification;
 - GNU C11 compilation of `transport/lib` and strict C90 flags for apps/tests;
 - rejection of a generated C99-only application probe;
-- rejection of a deliberately corrupted FAT by the image checker;
+- rejection of a cyclic FAT, impossible file sizes, and reserved directory names by the image checker;
+- rejection of `.`, `..`, and slash-containing injector target names without modifying the image;
+- rejection of truncated ELF, invalid section offsets, undefined and duplicate strong symbols, and output overflow by `elf2bin`;
 - a no-op incremental build;
 - runtime-header and kernel-include dependency rebuilding;
 - a clean build with `ld.lld` unavailable, forcing `elf2bin`;
