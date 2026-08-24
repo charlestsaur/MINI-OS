@@ -6,10 +6,10 @@ This document only describes shell behavior and day-to-day usage inside MINI-OS.
 
 After boot and filesystem bootstrap, MINI-OS enters a loop:
 
-1. Print current path prompt (`cwd >`).
-2. Read one command line from keyboard.
-3. Parse up to three tokens (`cmd arg1 arg2`).
-4. Dispatch command handler.
+- Print the current path prompt (`cwd >`).
+- Read one command line from the keyboard.
+- Parse up to three tokens (`cmd arg1 arg2`).
+- Dispatch the command handler.
 
 Main implementation:
 
@@ -72,8 +72,7 @@ Creates an empty file at the target path.
 
 Prints file content.
 
-The command validates and follows the complete FAT chain, printing only the
-bytes covered by the inode size.
+The command validates and follows the complete FAT chain, printing only the bytes covered by the inode size.
 
 ### `edit <file>`
 
@@ -85,8 +84,9 @@ Enters text input mode for a file.
 
 If file does not exist, the shell tries to create it first.
 
-This small editor accepts at most 510 bytes. Saving truncates an existing file
-to one data block and releases every former tail block.
+This small editor accepts at most 510 bytes.
+
+Saving truncates an existing file to one data block and releases every former tail block.
 
 ### `rm <path>`
 
@@ -110,10 +110,8 @@ Loads and executes a raw binary application from disk.
 - resolves target file Inode and verifies regular file type (`INODE_TYPE == 1`)
 - validates that the byte size, block count, and complete FAT chain agree
 - follows the FAT chain and loads at most 64 KiB into `0x00040000..0x0004FFFF`
-- clears the complete 64 KiB image region before loading, including space used
-  by the flat binary's zero-initialized data
-- rejects an executable path longer than 79 bytes and a second token longer
-  than 175 bytes
+- clears the complete 64 KiB image region before loading, including space used by the flat binary's zero-initialized data
+- rejects an executable path longer than 79 bytes and a second token longer than 175 bytes
 - saves kernel Shell stack pointer in `[saved_kernel_esp]`
 - sets application stack pointer `esp = 0x0008F000`
 - jumps to `0x00040000`
@@ -122,7 +120,15 @@ Loads and executes a raw binary application from disk.
 
 ### `format`
 
-Reformats filesystem and resets cwd to root.
+Explicitly reformats the already mounted MINI-OS filesystem and resets the current working directory to root.
+
+Startup never invokes this command automatically because invalid, dirty, or incompatible metadata causes a read-only halt before the shell is available.
+
+Formatting sets the persistent unfinished-mutation marker first and commits a clean superblock last.
+
+If any I/O fails, later writes in that boot are refused and the next boot rejects the unfinished filesystem.
+
+The command is destructive to all existing MINI-OS files on the mounted image.
 
 ## 4. Typical Usage Flow
 
@@ -194,6 +200,7 @@ Shell handlers map internal error codes to text messages, such as:
 - `Directory is not empty.`
 - `Invalid path or name.`
 - `Invalid move target.`
+- `Filesystem I/O failed; filesystem writes are disabled.`
 
 These mappings are defined in:
 

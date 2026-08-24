@@ -15,6 +15,7 @@ OS_IMG := $(BUILD_DIR)/mini_os.img
 INJECT_TOOL := $(BUILD_DIR)/inject_transport
 ELF2BIN_TOOL := $(BUILD_DIR)/elf2bin
 CHECK_TOOL := $(BUILD_DIR)/check_image
+CHECK_SOURCES := tools/check_image.c tools/check_image.h
 
 LIB_DIR := transport/lib
 APPS_DIR := transport/apps
@@ -56,13 +57,13 @@ $(BUILD_DIR):
 $(APP_BUILD_DIR):
 	mkdir -p $(APP_BUILD_DIR)
 
-$(INJECT_TOOL): tools/inject_transport.c $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
-	$(CC) $(HOST_CFLAGS) tools/inject_transport.c -o $(INJECT_TOOL)
+$(INJECT_TOOL): tools/inject_transport.c $(CHECK_SOURCES) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) -DCHECK_IMAGE_LIBRARY tools/inject_transport.c tools/check_image.c -o $(INJECT_TOOL)
 
 $(ELF2BIN_TOOL): tools/elf2bin.c Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/elf2bin.c -o $(ELF2BIN_TOOL)
 
-$(CHECK_TOOL): tools/check_image.c $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+$(CHECK_TOOL): $(CHECK_SOURCES) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/check_image.c -o $(CHECK_TOOL)
 
 $(CRT0_OBJ): $(CRT0_SRC) Makefile | $(BUILD_DIR)
@@ -110,7 +111,7 @@ app:
 $(KERNEL_BIN): $(KERNEL_DEPS) Makefile | $(BUILD_DIR)
 	$(NASM) -f bin $(KERNEL_SRC) -o $(KERNEL_BIN)
 
-$(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) Makefile | $(BUILD_DIR)
+$(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	@KERNEL_SIZE=$$(wc -c < $(KERNEL_BIN)); \
 	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
 	if [ $$KERNEL_SECTORS -gt 100 ]; then \

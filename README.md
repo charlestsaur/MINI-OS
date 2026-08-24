@@ -20,17 +20,16 @@ The documentation and some comments were written by Gemini and GPT. A small part
 ## Current Features
 
 - BIOS boot loader with EDD probing, per-sector retries, and CHS fallback
-- Protected-mode kernel entry (`[org 0x8000]`)
+- Protected-mode kernel image at `0x8000`, beginning with an executable entry jump to `kernel_start`
 - VGA text console and polling keyboard input
-- checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write)
-- Custom filesystem with persistent directory tree
+- checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write) with boot-image identity verification before mount
+- Custom filesystem with persistent directory tree and fail-stop detection of interrupted mutations
 - IDT Interrupt Table & `int 0x80` System Call Engine for console, heap, file, and cursor services
 - FAT-chain executable loader (`run <file>`) for flat binaries up to 64 KiB at `0x00040000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
 - Tested API subset exposed through `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, and `<assert.h>`
-- Host-side disk transport tool (`tools/inject_transport.c`) for inject `/transport/` files
-- Built-in shell commands:
-  `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `run <file>`, `format`
+- Host-side transactional disk transport tool (`tools/inject_transport.c`) for injecting `/transport/` files without exposing a partial output image
+- Built-in shell commands: `help`, `ls`, `pwd`, `cd`, `mkdir`, `touch`, `cat`, `edit`, `rm`, `mv`, `run <file>`, `format`
 
 ## Project Layout
 
@@ -52,7 +51,7 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `clang` for the freestanding modern-C runtime and strict-C90 apps/tests
 - `ld.lld` when available; otherwise the built-in `elf2bin` path is used
 - `qemu-system-i386`
-- `python3` for automated tests
+- Python 3.9 or newer for automated tests
 - standard shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
 
 ## Build and Run
@@ -98,9 +97,9 @@ run calc.bin
 
 Sector layout in current implementation:
 
-- `LBA 0`: boot sector
+- `LBA 0`: boot sector, including a per-image 48-bit identity
 - `LBA 1..100`: reserved kernel area
-- `LBA 101`: superblock
+- `LBA 101`: superblock, including the unfinished-mutation marker
 - `LBA 102`: inode bitmap
 - `LBA 103..118`: FAT
 - `LBA 119..374`: inode table
@@ -127,14 +126,17 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 ## Real Hardware Note
 
 > [!CAUTION]
-> MINI-OS uses a small experimental filesystem without journaling or crash
-> recovery. It is not intended for valuable or long-term storage.
+> MINI-OS uses a small experimental filesystem without journaling or crash recovery. It is not intended for valuable or long-term storage.
 >
 > Apart from this, MINI-OS does not perform any destructive operations on the machine. Nevertheless, to prevent potential data loss or hardware damage, it is still recommended to run it on a non-critical machine.
 
 This project currently targets BIOS/CSM-style boot flows.
 
-After BIOS loading, filesystem access requires the boot disk to remain exposed as the primary legacy ATA/IDE master. `make run` configures QEMU accordingly; many firmware USB paths do not provide this mapping.
+After BIOS loading, filesystem access requires the boot disk to remain exposed as the primary legacy ATA/IDE master.
+
+`make run` configures QEMU accordingly, but many firmware USB paths do not provide this mapping.
+
+Before mounting, the kernel compares immutable boot/kernel bytes and a per-image 48-bit identity with that ATA target and refuses mismatches without writing.
 
 For USB boot on physical machines, read `docs/Real_Hardware_Guide.md` carefully.
 

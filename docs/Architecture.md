@@ -10,13 +10,14 @@
 - Falls back to BIOS CHS reads when EDD is unavailable or its read path fails.
 - Advances the destination segment by 512 bytes per request, so no BIOS transfer buffer crosses a 64 KiB segment boundary.
 - Initializes temporary execution environment (segments/stack/GDT).
+- Carries the host-generated image identity in immutable boot-sector bytes.
 - Performs protected-mode transition.
 
 ### Layer 1: Kernel Core, IDT Syscalls, and Shell
 
 - File: `OS_src/kernel/main.asm`
 - Initializes console and IDT interrupt table.
-- Ensures file system availability.
+- Verifies that the primary-master ATA target matches the BIOS-loaded image, then requires a clean, valid filesystem.
 - Enters perpetual REPL shell loop.
 
 - File: `OS_src/kernel/idt.asm`
@@ -50,6 +51,8 @@
   
   Host-side C tool that parses MINI-OS filesystem structures and injects the host `transport/` tree at `/transport/` during `make`.
 
+  It performs all changes on a same-directory temporary copy and exposes them with a final atomic rename.
+
 - File: `tools/check_image.c`
 
   Read-only final-image verifier for inode reachability, directory consistency, FAT chains, allocation ownership, and geometry.
@@ -75,24 +78,38 @@ Directory entries are stored in data blocks referenced by directory inodes.
 
 ## Key Control Paths
 
-### Mount/Format
+### Mount and Explicit Format
 
-1. Read superblock.
-2. Validate magic and key geometry.
-3. Validate root inode.
-4. If invalid, format disk and bootstrap root + README.
+- Read primary-master LBA 0 and compare the immutable boot-code prefix and 48-bit image identity with the BIOS-loaded boot sector.
+- Compare an immutable kernel-code sample with the primary-master image.
+- On any target mismatch, halt without writing.
+- Read the superblock and validate its magic, geometry, root index, and clear unfinished-mutation marker.
+- Validate the root inode and its reserved FAT entries.
+- On invalid, dirty, or unreadable metadata, halt without formatting.
+- After a clean mount, allow the user to invoke the explicit `format` command.
+
+### Persistent Mutation
+
+- Persist unfinished-mutation marker `1` before the first operation write.
+- Perform the operation and any recoverable rollback steps.
+- A failure before any operation write may clear the marker, but any failure after the first successful operation write keeps it set.
+- Persist marker `0` last only after the complete operation, including any required rollback, succeeds.
+- Reject later writes in the same boot after any ATA read or write failure.
+- Keep the marker set after an I/O failure during a mutation so that the next boot refuses the image.
+
+The marker detects an ambiguous result, but it does not guarantee that earlier sector writes were rolled back.
 
 ### Executable Run (`run <file>`)
 
-1. Resolve file Inode via path lookup.
-2. Verify target is a regular file (`type == 1`).
-3. Require a nonzero byte size no greater than 64 KiB and an exact `ceil(size / 512)` block count.
-4. Validate the complete FAT chain, including range, cycle, and final-EOC checks, before changing the application image.
-5. Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each data block into `0x00040000 + i * 512`.
-6. Copy bounded argument strings and build `argv` at `0x0008E000`.
-7. Save Shell stack pointer in `[saved_kernel_esp]`.
-8. Set stack pointer `esp = 0x0008F000` and `call 0x00040000`.
-9. On `sys_exit` (`int 0x80`, `eax=1`), `syscall_entry` restores `[saved_kernel_esp]` and jumps to `return_to_shell`.
+- Resolve the file inode through path lookup.
+- Verify that the target is a regular file (`type == 1`).
+- Require a nonzero byte size no greater than 64 KiB and an exact `ceil(size / 512)` block count.
+- Validate the complete FAT chain, including range, cycle, and final-EOC checks, before changing the application image.
+- Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each data block into `0x00040000 + i * 512`.
+- Copy bounded argument strings and build `argv` at `0x0008E000`.
+- Save the shell stack pointer in `[saved_kernel_esp]`.
+- Set `esp = 0x0008F000` and call `0x00040000`.
+- On `sys_exit` (`int 0x80`, `eax=1`), restore `[saved_kernel_esp]` in `syscall_entry` and jump to `return_to_shell`.
 
 Applications are trusted Ring 0 code in the kernel's flat address space.
 
@@ -100,19 +117,19 @@ The syscall ABI organizes application access to kernel services, but it does not
 
 ### Path Resolution
 
-1. Choose root/cwd start based on absolute vs relative path.
-2. Split path by `/`.
-3. Handle `.` and `..`.
-4. Resolve each component through directory lookup.
+- Choose the root or current working directory as the starting point according to whether the path is absolute or relative.
+- Split the path by `/`.
+- Handle `.` and `..`.
+- Resolve each component through directory lookup.
 
 ### Rename/Move
 
-1. Split old and new path into `(parent, name)`.
-2. Validate destination does not already exist.
-3. Reject moving directory into its own subtree.
-4. Write destination entry.
-5. Clear source entry.
-6. Update inode parent + name.
+- Split the old and new paths into `(parent, name)` pairs.
+- Verify that the destination does not already exist.
+- Reject moving a directory into its own subtree.
+- Write the destination entry.
+- Update the inode parent and name.
+- Clear the source entry.
 
 ## Memory Map & Static Buffers
 
@@ -139,9 +156,6 @@ This avoids dynamic memory management and keeps flows explicit.
 
 Most filesystem APIs return integer status codes (`0` success, negative error). The shell maps these to messages.
 
-Representative errors:
+Representative filesystem errors are `-1` not found, `-2` already exists, `-3` not a directory, `-4` directory not empty, `-5` invalid input, `-8` I/O, `-9` corrupt metadata, `-10` protected path, `-11` path too long, and `-12` wrong storage target.
 
-- `-1`: not found/exists depending on context
-- `-2`: not dir / no inode / not empty depending on API
-- `-3`: root deny / invalid move / no data depending on API
-- `-4`: invalid path/name or slot exhaustion in selected APIs
+Any ATA I/O error poisons filesystem writes for that boot, and an active mutation also preserves the on-disk marker.

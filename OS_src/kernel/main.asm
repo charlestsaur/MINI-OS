@@ -26,6 +26,9 @@ KBD_DATA_PORT       equ 0x60
 %define FS_LAYOUT_CONST(name, value) name equ value
 %include "OS_src/kernel/fs/layout.def"
 %undef FS_LAYOUT_CONST
+%if FS_SUPER_DIRTY_OFFSET + 4 > 512
+    %error "superblock dirty field must fit in its sector"
+%endif
 
 %define SYSCALL_CONST(name, value) name equ value
 %include "transport/lib/syscall.def"
@@ -43,6 +46,7 @@ FS_ERR_IO            equ -8
 FS_ERR_CORRUPT       equ -9
 FS_ERR_PROTECTED     equ -10
 FS_ERR_PATH_TOO_LONG equ -11
+FS_ERR_WRONG_DEVICE  equ -12
 
 FS_MAX_PATH          equ 127
 FS_MAX_DEPTH         equ 32
@@ -77,6 +81,11 @@ DIR_ENTRY_NAME_LEN  equ 27
 FS_NAME_MAX         equ DIR_ENTRY_NAME_LEN - 1
 DIR_ENTRIES_PER_BLK equ 16
 
+BOOT_CODE_ADDR      equ 0x00007C00
+BOOT_CODE_CHECK_LEN equ 256
+BOOT_VOLUME_ID_ADDR equ BOOT_CODE_ADDR + FS_BOOT_ID_OFFSET
+KERNEL_CODE_CHECK_LEN equ 64
+
 BUF_SUPERBLOCK      equ 0x20000
 BUF_BITMAP          equ 0x21000
 BUF_SECTOR          equ 0x22000
@@ -90,6 +99,14 @@ PATH_OLD_NAME_BUF   equ BUF_TEXT + 544
 PATH_NEW_NAME_BUF   equ BUF_TEXT + 576
 FS_VISITED_BUF      equ BUF_TEXT + 1024
 PATH_BUILD_BUF      equ BUF_TEXT + 1536
+
+; The boot sector transfers control to the first byte of the kernel image.
+; Keep an executable entry stub here; the globals below are data, not code.
+kernel_image_entry:
+    jmp kernel_start
+%if kernel_image_entry != $$
+    %error "kernel entry stub must be the first byte of the image"
+%endif
 
 cursor_row          dd 0
 cursor_col          dd 0
@@ -134,6 +151,10 @@ tmp_run_block       dd 0
 tmp_run_blocks      dd 0
 tmp_run_index       dd 0
 saved_kernel_esp    dd 0
+fs_mutation_active  db 0
+fs_mutation_touched db 0
+fs_io_poisoned      db 0
+tmp_mutation_result dd 0
 
 kernel_start:
     cli
@@ -146,7 +167,13 @@ kernel_start:
     call idt_init
     call fs_bootstrap
     cmp eax, FS_OK
+    je .fs_ready
+    cmp eax, FS_ERR_WRONG_DEVICE
     jne kernel_fs_fatal
+    mov esi, msg_wrong_device
+    call vga_print
+    jmp kernel_fs_halt
+.fs_ready:
     call fs_set_cwd_root
 
     mov esi, msg_ready
@@ -169,6 +196,7 @@ shell_loop:
 kernel_fs_fatal:
     mov esi, msg_fs_fatal
     call vga_print
+kernel_fs_halt:
     cli
     hlt
     jmp kernel_fs_fatal
@@ -184,8 +212,8 @@ kernel_fs_fatal:
 ; ----------------------------
 msg_boot           db "MINI_OS: booting kernel...", 10, 0
 msg_mount_ok       db "MINI_OS: filesystem detected.", 10, 0
-msg_format         db "MINI_OS: no filesystem found, formatting disk...", 10, 0
 msg_format_ok      db "MINI_OS: format complete.", 10, 0
+msg_wrong_device   db "MINI_OS: boot device does not match primary ATA master; writes refused.", 10, 0
 msg_ready          db "MINI_OS: shell ready. Type 'help'.", 10, 0
 msg_prompt_suffix  db " > ", 0
 
@@ -205,7 +233,7 @@ msg_no_data        db "No free data block available.", 10, 0
 msg_rm_deny        db "Cannot remove root, current directory, or its ancestor.", 10, 0
 msg_invalid_path   db "Invalid path or name.", 10, 0
 msg_mv_invalid     db "Invalid move target.", 10, 0
-msg_fs_io          db "Filesystem I/O failed.", 10, 0
+msg_fs_io          db "Filesystem I/O failed; filesystem writes are disabled.", 10, 0
 msg_fs_corrupt     db "Filesystem metadata is corrupt.", 10, 0
 msg_path_too_long  db "Path is too deep or too long.", 10, 0
 msg_fs_fatal       db "MINI_OS: filesystem unavailable; system halted.", 10, 0

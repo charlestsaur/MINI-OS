@@ -546,6 +546,10 @@ shell_edit:
     mov ecx, 510
     call kbd_read_text
     mov [tmp_edit_length], eax
+
+    call fs_begin_mutation
+    cmp eax, FS_OK
+    jl .lookup_fail
     mov byte [tmp_edit_detached], 0
     mov byte [tmp_edit_allocated], 0
     mov dword [tmp_edit_tail], FS_FAT_EOC
@@ -634,6 +638,10 @@ shell_edit:
     jl .lookup_fail
 
 .saved:
+    mov eax, FS_OK
+    call fs_complete_mutation
+    cmp eax, FS_OK
+    jl .lookup_fail
     mov esi, msg_edit_ok
     call vga_print
     pop esi
@@ -678,6 +686,10 @@ shell_edit:
 .corrupt:
     mov eax, FS_ERR_CORRUPT
 .lookup_fail:
+    cmp byte [fs_mutation_active], 1
+    jne .print_lookup_error
+    call fs_complete_mutation
+.print_lookup_error:
     call shell_print_fs_error
     pop esi
     ret

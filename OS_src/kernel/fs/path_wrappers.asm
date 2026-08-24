@@ -46,20 +46,34 @@ fs_change_dir_path:
 ; IN: ESI=path
 ; OUT: EAX=created inode or a filesystem error
 fs_create_file_path:
-    call fs_split_parent_name
+    push esi
+    call fs_begin_mutation
+    pop esi
     cmp eax, FS_OK
     jl .done
+    call fs_split_parent_name
+    cmp eax, FS_OK
+    jl .complete
     call fs_create_file_in_dir
+.complete:
+    call fs_complete_mutation
 .done:
     ret
 
 ; IN: ESI=path
 ; OUT: EAX=FS_OK or a filesystem error
 fs_create_dir_path:
-    call fs_split_parent_name
+    push esi
+    call fs_begin_mutation
+    pop esi
     cmp eax, FS_OK
     jl .done
+    call fs_split_parent_name
+    cmp eax, FS_OK
+    jl .complete
     call fs_create_dir_in_dir
+.complete:
+    call fs_complete_mutation
 .done:
     ret
 
@@ -67,23 +81,45 @@ fs_create_dir_path:
 ; OUT: EAX=FS_OK or a filesystem error
 fs_remove_path:
     push esi
+    call fs_begin_mutation
+    pop esi
+    cmp eax, FS_OK
+    jl .done
+    push esi
     call fs_path_is_root
     pop esi
     cmp al, 1
     je .protected
     call fs_split_parent_name
     cmp eax, FS_OK
-    jl .done
+    jl .complete
     call fs_remove_entry_in_dir
-    ret
+    jmp .complete
 .protected:
     mov eax, FS_ERR_PROTECTED
+.complete:
+    call fs_complete_mutation
 .done:
     ret
 
 ; IN: ESI=old path, EDI=new path
 ; OUT: EAX=FS_OK or a filesystem error
 fs_rename_path:
+    mov [tmp_mv_old_path], esi
+    mov [tmp_mv_new_path], edi
+    push esi
+    push edi
+    call fs_begin_mutation
+    pop edi
+    pop esi
+    cmp eax, FS_OK
+    jl .done
+    call fs_rename_path_mutation
+    call fs_complete_mutation
+.done:
+    ret
+
+fs_rename_path_mutation:
     mov [tmp_mv_old_path], esi
     mov [tmp_mv_new_path], edi
 

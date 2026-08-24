@@ -6,7 +6,7 @@ This guide explains how to write, compile, and execute C90 applications for **MI
 
 MINI-OS supports executing trusted C applications written in **ANSI C (C90)**.
 
-Application source under `transport/apps/` is compiled with strict C90 diagnostics (`-std=c90 -pedantic-errors -Wall -Wextra -Werror`).
+Application and executable-test source under `transport/apps/` and `transport/lib_test/` is compiled with strict C90 diagnostics (`-std=c90 -pedantic-errors -Wall -Wextra -Werror`).
 
 The runtime implementation under `transport/lib/` intentionally uses modern C and is built separately.
 
@@ -22,25 +22,25 @@ An application can access kernel memory and privileged instructions, and its fau
 
 When writing C code for MINI-OS, adhere strictly to C90 syntax:
 
-1. **Variable Declarations at Block Top**: All local variables must be declared at the beginning of a block before any executable statements.
+- **Variable Declarations at Block Top**: All local variables must be declared at the beginning of a block before any executable statements.
 
-   ```c
-   /* Correct C90 */
-   int main(void) {
-       int i;
-       int sum = 0;
-       for (i = 0; i < 10; i++) {
-           sum += i;
-       }
-       return 0;
-   }
-   ```
+  ```c
+  /* Correct C90 */
+  int main(void) {
+      int i;
+      int sum = 0;
+      for (i = 0; i < 10; i++) {
+          sum += i;
+      }
+      return 0;
+  }
+  ```
 
-   *(Do not declare `for (int i = 0; ...)` inside the loop header).*
+  *(Do not declare `for (int i = 0; ...)` inside the loop header).*
 
-2. **Block Comments**: Use standard C comments (`/* comment */`).
-3. **Dynamic Memory Allocation (`malloc`/`free`)**: Supported! Applications can dynamically allocate and free heap memory from `0x00050000` to `0x00080000` via `sys_brk` (EAX=12).
-4. **No Floating-Point Operations**: The x87 FPU is not initialized in protected mode. Avoid `float` and `double` arithmetic.
+- **Block Comments**: Use standard C comments (`/* comment */`).
+- **Dynamic Memory Allocation (`malloc`/`free`)**: Applications can dynamically allocate and free heap memory from `0x00050000` to `0x00080000` through `sys_brk` (`EAX=12`).
+- **No Floating-Point Operations**: The x87 FPU is not initialized in protected mode, so avoid `float` and `double` arithmetic.
 
 ### 2.2 Standard Library Support (`minilibc`)
 
@@ -82,6 +82,7 @@ transport/
 │   ├── test_string.c
 │   ├── test_heap.c
 │   ├── test_file.c
+│   ├── test_no_space.c
 │   └── test_bss.c
 └── build/                   <-- Compiled Output Binaries
     ├── apps/                <-- User App Executables (hello.bin, calc.bin, etc.)
@@ -116,16 +117,15 @@ MINI-OS uses an automated build toolchain:
 [ transport/build/apps/*.bin ] ──> [ inject_transport ] ──> [ /transport/ in mini_os.img ]
 ```
 
-1. **C Runtime Startup (`crt0.asm`)**:
-   - `_start` executes at entry point `0x00040000`.
-   - Calls `main()`.
-   - Passes `main`'s return value to `sys_exit` via `int 0x80 (EAX=1)`.
+- **C Runtime Startup (`crt0.asm`)**:
+  - `_start` executes at entry point `0x00040000`.
+  - Calls `main()`.
+  - Passes `main`'s return value to `sys_exit` via `int 0x80 (EAX=1)`.
 
-2. **Host Transport Injector (`tools/inject_transport.c`)**:
-   - Built automatically during `make`.
-   - Parses the MINI-OS disk image format.
-   - Injects the `transport/` tree, including `transport/build/apps/*.bin`, at
-     `/transport/` in `mini_os.img`.
+- **Host Transport Injector (`tools/inject_transport.c`)**:
+  - Built automatically during `make`.
+  - Parses the MINI-OS disk image format.
+  - Injects the `transport/` tree, including `transport/build/apps/*.bin`, at `/transport/` in `mini_os.img`.
 
 ## 5. Building and Running User Applications
 
@@ -154,29 +154,29 @@ make run
 
 ### Step 3: Execute User Binaries in MINI-OS Shell
 
-1. Navigate to the compiled binaries directory `/transport/build/apps`:
+- Navigate to the compiled binaries directory `/transport/build/apps`:
 
-   ```text
-   / > cd /transport/build/apps
-   ```
+  ```text
+  / > cd /transport/build/apps
+  ```
 
-2. List compiled binaries:
+- List compiled binaries:
 
-   ```text
-   /transport/build/apps > ls
-   entries:
-    - calc.bin (f)
-    - guess.bin (f)
-    - banner.bin (f)
-    - hello.bin (f)
-    - vedit.bin (f)
-   ```
+  ```text
+  /transport/build/apps > ls
+  entries:
+   - calc.bin (f)
+   - guess.bin (f)
+   - banner.bin (f)
+   - hello.bin (f)
+   - vedit.bin (f)
+  ```
 
-3. Run an application:
+- Run an application:
 
-   ```text
-   /transport/build/apps > run calc.bin
-   ```
+  ```text
+  /transport/build/apps > run calc.bin
+  ```
 
 ### Expected Output in MINI-OS Console
 

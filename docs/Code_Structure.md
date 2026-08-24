@@ -6,12 +6,13 @@ This document only describes code/file responsibilities.
 
 - `OS_src/boot/boot.asm`
   - EDD detection, bounded one-sector reads, retries, disk resets, and CHS fallback
+  - fixed location for the host-generated per-image boot identity
   - GDT setup and protected-mode jump
 
 ## 2. Kernel Entry and Global Constants
 
 - `OS_src/kernel/main.asm`
-  - kernel entry point (`[org 0x8000]`)
+  - kernel image origin (`[org 0x8000]`) and first-byte jump to `kernel_start`
   - global constants (VGA, ATA, filesystem layout)
   - global state buffers and scratch variables
   - includes shell/fs/driver/utility modules
@@ -47,7 +48,7 @@ This document only describes code/file responsibilities.
 
 ## 7. Filesystem Modules
 
-- `OS_src/kernel/fs/bootstrap.asm`: mount/format/bootstrap
+- `OS_src/kernel/fs/bootstrap.asm`: storage-target verification, clean mount, explicit format, and persistent mutation-marker lifecycle
 - `OS_src/kernel/fs/path.asm`: path resolve/split/validation/cwd path rebuild
 - `OS_src/kernel/fs/dir.asm`: directory entry read/write/clear/scan helpers
 - `OS_src/kernel/fs/ops.asm`: high-level create/remove/rename logic
@@ -60,11 +61,13 @@ This document only describes code/file responsibilities.
 
 - `tools/inject_transport.c`
   - checked host C program for deterministic injection of the `transport/` tree at `/transport/`
-  - validates image geometry and FAT chains and propagates mutation failures
+  - assigns the per-image boot identity and validates image geometry/FAT chains
+  - mutates a same-directory temporary copy and atomically replaces the target only after flush, close, and the full image-integrity gate succeed
+- `tools/check_image.c` / `tools/check_image.h`
+  - reusable read-only boot-identity, mutation-marker, geometry, inode, directory, FAT-chain, reachability, and allocation-ownership verifier
+  - command-line checker and the injector's pre-rename commit gate share the same implementation
 - `tools/elf2bin.c`
   - host C 32-bit ELF linker and flat binary generator
-- `tools/check_image.c`
-  - read-only image geometry, inode, directory, FAT-chain, reachability, and allocation-ownership verifier
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
@@ -72,7 +75,7 @@ This document only describes code/file responsibilities.
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
 - `transport/lib_test/`
-  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, and `test_bss.c`
+  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, and `test_bss.c`
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
@@ -87,6 +90,6 @@ This document only describes code/file responsibilities.
 ## 10. Automated Test Drivers
 
 - `tests/qemu_e2e.py`
-  - boots a temporary debug image, drives the shell, asserts application and multi-block filesystem behavior, restarts the same image, and checks it
+  - boots temporary debug images, drives the shell, asserts application and multi-block filesystem behavior, restarts and checks persistent state, injects an ATA write error, verifies wrong-device refusal, and exercises the supported QEMU machine/CHS matrix
 - `tests/test_build.py`
-  - checks clean and incremental builds, C language policy, dependency edges, checker rejection, and both flat-binary link paths
+  - checks clean and incremental builds, C language policy, dependency edges, checker rejection, both flat-binary link paths, and every before/after sector-write failure point in the host injector transaction

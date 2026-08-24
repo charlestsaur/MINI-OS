@@ -3,9 +3,11 @@
 This guide explains how to boot MINI-OS from a real USB drive and how to debug the common case where QEMU works but a physical machine shows only a blinking cursor.
 
 > [!CAUTION]
-> MINI-OS uses a very primitive file system implementation and has known flaws (such as aggressive, brute-force disk read/write operations). Therefore, long-term use may increase hardware wear and tear.
+> MINI-OS writes the mounted filesystem and has no repair utility.
 >
-> Apart from this, MINI-OS does not perform any destructive operations on the machine. Nevertheless, to prevent potential data loss or hardware damage, it is still recommended to run it on a non-critical machine.
+> Use only a dedicated, non-critical test device.
+>
+> Writing the image to a raw device erases the prior contents of that target.
 
 ## 1. Why QEMU Works but Hardware Fails
 
@@ -22,11 +24,20 @@ MINI_OS currently expects a legacy BIOS-style boot flow.
 
 Before testing on physical hardware, ensure all of the following:
 
-1. Boot mode is Legacy BIOS or CSM (not UEFI-only).
-2. Secure Boot is disabled.
-3. USB drive is selected in legacy boot menu.
-4. The image is written to the whole USB device, not to a partition.
-5. After boot, firmware/chipset compatibility exposes that same medium as the primary legacy ATA/IDE master (`0x1F0..0x1F7`). BIOS loading alone does not guarantee this protected-mode mapping.
+- Boot mode is Legacy BIOS or CSM rather than UEFI-only.
+- Secure Boot is disabled.
+- The USB drive is selected in the legacy boot menu.
+- The image is written to the whole USB device rather than to a partition.
+- After boot, firmware and chipset compatibility expose that same medium as the primary legacy ATA/IDE master (`0x1F0..0x1F7`).
+- BIOS loading alone does not guarantee this protected-mode mapping.
+
+Before mount, the kernel compares the executing boot-code prefix, a per-image 48-bit identity, and an immutable kernel-code sample with the primary-master ATA image.
+
+If they differ, it prints a wrong-device message and halts without writing.
+
+This normally protects independently generated images.
+
+Images sharing all checked identity/code bytes, including clones whose filesystems later diverge, cannot be distinguished by this mechanism, and independent 48-bit identities also have a small theoretical collision probability.
 
 ## 3. Build and Prepare Image
 
@@ -104,11 +115,11 @@ Use a raw image writer (for example Rufus in DD mode, or Win32 Disk Imager), and
 
 In firmware setup:
 
-1. Disable Secure Boot.
-2. Enable CSM/Legacy Boot.
-3. Prefer Legacy USB boot path.
-4. Temporarily disable Fast Boot.
-5. Put USB device first in boot order (or use one-time boot menu).
+- Disable Secure Boot.
+- Enable CSM/Legacy Boot.
+- Prefer the Legacy USB boot path.
+- Temporarily disable Fast Boot.
+- Put the USB device first in the boot order, or use the one-time boot menu.
 
 If your machine is UEFI-only with no CSM support, this MINI_OS build will not boot directly.
 
@@ -117,13 +128,16 @@ If your machine is UEFI-only with no CSM support, this MINI_OS build will not bo
 On successful boot you should see text similar to:
 
 - `MINI_OS: booting kernel...`
-- `MINI_OS: filesystem detected.` (or format message on first run)
+- `MINI_OS: filesystem detected.`
 - prompt like `/ >`
+
+There is no first-boot automatic format.
+
+An invalid, incompatible, or unfinished filesystem prints `MINI_OS: filesystem unavailable; system halted.` and receives no startup writes.
 
 If you only see a blinking cursor, use the troubleshooting section below.
 
-If kernel loading fails after all EDD and CHS attempts, the bootloader prints
-`F` and halts.
+If kernel loading fails after all EDD and CHS attempts, the bootloader prints `F` and halts.
 
 The loader probes EDD and retries one sector at a time. If EDD is unavailable or repeatedly fails, it restarts the complete kernel load through CHS.
 
@@ -133,19 +147,21 @@ A successful BIOS loading stage does not prove that the later ATA driver can add
 
 ### 7.1 Most common causes
 
-1. Booted in UEFI mode while image expects BIOS mode.
-2. USB image written to a partition instead of whole disk.
-3. Wrong target disk selected during `dd`.
-4. Firmware silently rejects USB geometry/boot path.
-5. BIOS loaded the USB image, but protected mode does not expose it as primary legacy ATA master; in this case the kernel normally reaches its filesystem fatal message after its ATA readiness timeout.
+- The machine booted in UEFI mode while the image expects BIOS mode.
+- The USB image was written to a partition instead of the whole disk.
+- The wrong target disk was selected during `dd`.
+- Firmware silently rejects the USB geometry or boot path.
+- BIOS loaded the USB image, but protected mode does not expose it as primary legacy ATA master.
+- A readable but different primary disk produces `MINI_OS: boot device does not match primary ATA master; writes refused.`
+- An unavailable ATA path reaches the filesystem fatal message after timeout.
 
 ### 7.2 Quick diagnosis steps
 
-1. Rebuild and rewrite image from scratch.
-2. Re-check boot mode is Legacy/CSM.
-3. Try another USB port (prefer USB 2.0 port if available).
-4. Try another USB flash drive model.
-5. Use one-time boot menu and explicitly pick legacy USB entry.
+- Rebuild and rewrite the image from scratch.
+- Re-check that the boot mode is Legacy/CSM.
+- Try another USB port, preferably a USB 2.0 port if available.
+- Try another USB flash drive model.
+- Use the one-time boot menu and explicitly select the legacy USB entry.
 
 ### 7.3 Add a visible boot-sector heartbeat
 
@@ -154,11 +170,36 @@ If needed, add a single character print at the very top of `OS_src/boot/boot.asm
 ## 8. Real-Hardware Compatibility Notes (Current Project State)
 
 - The boot sector probes INT 13h extensions and otherwise uses a corrected CHS fallback; both paths issue one-sector requests with bounded retries.
-- Disk I/O in protected mode uses only primary-master ATA PIO ports (`0x1F0..0x1F7`) and cannot discover the BIOS boot device.
-- QEMU is launched with the image explicitly attached as IDE index 0. Many real USB boot paths do not preserve an equivalent mapping after protected-mode entry.
+- Disk I/O in protected mode uses only primary-master ATA PIO ports (`0x1F0..0x1F7`) and does not remap the BIOS boot device.
+- The kernel verifies the image identity before mount and refuses mismatches.
+- QEMU is launched with the image explicitly attached as IDE index 0.
+- Many real USB boot paths do not preserve an equivalent mapping after protected-mode entry.
+
+The repeatable emulator matrix currently records:
+
+The automated rows below passed with QEMU 11.1.0 on 2026-08-24, and the `q35` negative result was observed in the same environment.
+
+| Environment | Result |
+| --- | --- |
+| QEMU default PC, normal EDD path | shell ready and full persistence suite passes |
+| QEMU `isapc`, normal EDD path | shell ready |
+| Forced CHS `5/16/63` | shell ready |
+| Forced CHS `66/4/17` | shell ready |
+| Forced CHS `263/1/17` | shell ready |
+| Boot image on secondary master; primary independently mismatches boot code, identity, or kernel code | all three wrong-device halts; SHA-256 of both images unchanged |
+| One-shot EIO on FAT LBA 103 | write-disabled state, persistent unfinished marker, remount refused |
+| One-shot EIO while reading `README.TXT` | same-boot writes refused; image unchanged and clean; reboot recovers |
+| Two-block write with only one free block | partial write detected, persistent unfinished marker, remount refused |
+| QEMU `q35` | filesystem unavailable; outside the primary legacy ATA path |
+
+The first nine rows are covered by `tests/qemu_e2e.py`, while the `q35` row records the explicit negative observation made during this review.
+
+Physical machines have not yet been tested, so the table does not claim firmware or USB-controller compatibility.
 
 ## 9. Current Compatibility Boundary
 
 At the current stage, this image should be treated as BIOS/CSM-oriented and primary-legacy-ATA-master-oriented.
+
+A target mismatch is safe-fail rather than an alternate-device fallback.
 
 UEFI-only machines without CSM are outside the present supported path.

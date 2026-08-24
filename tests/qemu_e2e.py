@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import select
@@ -12,10 +14,17 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Optional
 
 
 BOOT_TIMEOUT = 10.0
 COMMAND_TIMEOUT = 12.0
+BOOT_ID_OFFSET = 504
+BOOT_ID_SIZE = 6
+SUPERBLOCK_LBA = 101
+INODE_BITMAP_LBA = 102
+FAT_LBA = 103
+DATA_BLOCK_COUNT = 4096
 
 
 def run_checked(command: list[str], cwd: Path) -> None:
@@ -55,9 +64,16 @@ def prepare_debug_image(
         boot_command.extend(["-d", "BOOT_FORCE_CHS=1"])
     boot_command.extend(["-f", "bin", "OS_src/boot/boot.asm", "-o", str(boot)])
     run_checked(boot_command, repo)
-    boot_bytes = boot.read_bytes()
+    boot_bytes = bytearray(boot.read_bytes())
     if len(boot_bytes) != 512 or boot_bytes[510:] != b"\x55\xaa":
         raise RuntimeError("debug boot sector has an invalid size or signature")
+
+    with source.open("rb") as source_image:
+        source_image.seek(BOOT_ID_OFFSET)
+        boot_id = source_image.read(BOOT_ID_SIZE)
+    if len(boot_id) != BOOT_ID_SIZE or not any(boot_id):
+        raise RuntimeError("source image has no boot volume ID")
+    boot_bytes[BOOT_ID_OFFSET : BOOT_ID_OFFSET + BOOT_ID_SIZE] = boot_id
 
     shutil.copy2(source, destination)
     with destination.open("r+b") as image:
@@ -70,19 +86,35 @@ def prepare_debug_image(
 
 
 class VirtualMachine:
-    def __init__(self, image: Path, log: Path, qemu: str, instance: int) -> None:
+    def __init__(
+        self,
+        image: Path,
+        log: Path,
+        qemu: str,
+        instance: int,
+        storage_args: Optional[list[str]] = None,
+        extra_args: Optional[list[str]] = None,
+    ) -> None:
         self.image = image
         self.log = log
         self.qemu = qemu
         self.instance = instance
-        self.process: subprocess.Popen[bytes] | None = None
+        self.storage_args = storage_args
+        self.extra_args = extra_args or []
+        self.process: Optional[subprocess.Popen[bytes]] = None
 
-    def start(self) -> None:
+    def start(
+        self, expected: str = "MINI_OS: shell ready", timeout: float = BOOT_TIMEOUT
+    ) -> None:
         self.log.write_bytes(b"")
-        command = [
-            self.qemu,
+        storage_args = self.storage_args or [
             "-drive",
             f"file={self.image},format=raw,if=ide,index=0,media=disk",
+        ]
+        command = [
+            self.qemu,
+            *storage_args,
+            *self.extra_args,
             "-display",
             "none",
             "-monitor",
@@ -104,7 +136,7 @@ class VirtualMachine:
             error = self.process.stderr.read().decode("utf-8", "replace")
             raise RuntimeError(f"QEMU exited during startup: {error}")
         self._read_prompt()
-        self.wait_for("MINI_OS: shell ready", 0, BOOT_TIMEOUT)
+        self.wait_for(expected, 0, timeout)
 
     def _read_prompt(self) -> str:
         if self.process is None or self.process.stdout is None:
@@ -120,7 +152,10 @@ class VirtualMachine:
                 raise RuntimeError("timed out reading the QEMU monitor prompt")
             chunk = os.read(self.process.stdout.fileno(), 4096)
             if not chunk:
-                raise RuntimeError("QEMU monitor closed unexpectedly")
+                error = ""
+                if self.process.poll() is not None and self.process.stderr is not None:
+                    error = self.process.stderr.read().decode("utf-8", "replace")
+                raise RuntimeError(f"QEMU monitor closed unexpectedly: {error}")
             response.extend(chunk)
         return response.decode("utf-8", "replace")
 
@@ -196,6 +231,44 @@ def check_image(checker: Path, image: Path, repo: Path) -> None:
     run_checked([str(checker), str(image)], repo)
 
 
+def expect_image_rejected(
+    checker: Path, image: Path, repo: Path, expected: str
+) -> None:
+    result = subprocess.run(
+        [str(checker), str(image)], cwd=repo, text=True, capture_output=True
+    )
+    output = result.stdout + result.stderr
+    if result.returncode == 0 or expected not in output:
+        raise RuntimeError(
+            f"checker did not reject {image.name} with {expected!r}:\n{output}"
+        )
+
+
+def image_digest(image: Path) -> str:
+    digest = hashlib.sha256()
+    with image.open("rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def blockdev(arguments: dict[str, object]) -> list[str]:
+    return ["-blockdev", json.dumps(arguments, separators=(",", ":"))]
+
+
+def count_free_data_blocks(image: Path) -> int:
+    with image.open("rb") as stream:
+        stream.seek(FAT_LBA * 512)
+        fat = stream.read(DATA_BLOCK_COUNT * 2)
+    if len(fat) != DATA_BLOCK_COUNT * 2:
+        raise RuntimeError("image has a truncated FAT")
+    return sum(
+        1
+        for block in range(2, DATA_BLOCK_COUNT)
+        if fat[block * 2 : block * 2 + 2] == b"\0\0"
+    )
+
+
 def smoke_test(vm: VirtualMachine) -> None:
     vm.command_expect(
         "run /transport/build/lib_test/test_bss.bin", "BSS test: PASS"
@@ -256,13 +329,358 @@ def forced_chs_test(
 ) -> None:
     image = temp / "mini_os_chs.img"
     prepare_debug_image(repo, source, image, force_chs=True)
-    vm = VirtualMachine(image, temp / "session-chs.log", qemu, -1)
+    geometries = ((5, 16, 63), (66, 4, 17), (263, 1, 17))
+    for index, (cylinders, heads, sectors) in enumerate(geometries):
+        storage = [
+            *blockdev(
+                {
+                    "driver": "file",
+                    "filename": str(image),
+                    "node-name": f"chs-file-{index}",
+                }
+            ),
+            *blockdev(
+                {
+                    "driver": "raw",
+                    "file": f"chs-file-{index}",
+                    "node-name": f"chs-raw-{index}",
+                }
+            ),
+            "-device",
+            (
+                f"ide-hd,drive=chs-raw-{index},bus=ide.0,unit=0,"
+                f"cyls={cylinders},heads={heads},secs={sectors}"
+            ),
+        ]
+        vm = VirtualMachine(
+            image, temp / f"session-chs-{index}.log", qemu, -1, storage
+        )
+        try:
+            vm.start()
+            vm.command_expect("pwd", "/ > ")
+        finally:
+            vm.stop()
+    check_image(checker, image, repo)
+
+
+def machine_compatibility_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "mini_os_isapc.img"
+    shutil.copy2(source, image)
+    vm = VirtualMachine(
+        image,
+        temp / "session-isapc.log",
+        qemu,
+        -2,
+        extra_args=["-machine", "isapc"],
+    )
     try:
         vm.start()
         vm.command_expect("pwd", "/ > ")
     finally:
         vm.stop()
     check_image(checker, image, repo)
+
+
+def wrong_device_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    with source.open("rb") as stream:
+        stream.seek(512)
+        entry_stub = stream.read(5)
+    if len(entry_stub) == 5 and entry_stub[0] == 0xE9:
+        instruction_size = 5
+        displacement = int.from_bytes(entry_stub[1:], "little", signed=True)
+    elif len(entry_stub) >= 2 and entry_stub[0] == 0xEB:
+        instruction_size = 2
+        displacement = int.from_bytes(entry_stub[1:2], "little", signed=True)
+    else:
+        raise RuntimeError("debug kernel has no entry stub")
+    kernel_start = instruction_size + displacement
+    if kernel_start < instruction_size or kernel_start + 10 >= 100 * 512:
+        raise RuntimeError("debug kernel entry stub has an invalid target")
+    cases = (
+        ("boot-code", 100, 0x5A),
+        ("identity", BOOT_ID_OFFSET, 0xA5),
+        ("kernel-code", 512 + kernel_start + 10, 0x3C),
+    )
+
+    for index, (label, offset, mask) in enumerate(cases):
+        boot_image = temp / f"wrong-device-boot-{label}.img"
+        victim_image = temp / f"wrong-device-primary-{label}.img"
+        shutil.copy2(source, boot_image)
+        shutil.copy2(source, victim_image)
+        with victim_image.open("r+b") as stream:
+            if label == "identity":
+                stream.seek(offset)
+                identity = bytearray(stream.read(BOOT_ID_SIZE))
+                if len(identity) != BOOT_ID_SIZE:
+                    raise RuntimeError("cannot prepare identity mismatch")
+                identity[0] ^= mask
+                if not any(identity):
+                    identity[0] = 1
+                stream.seek(offset)
+                stream.write(identity)
+            else:
+                stream.seek(offset)
+                original = stream.read(1)
+                if len(original) != 1:
+                    raise RuntimeError(f"cannot prepare {label} mismatch")
+                stream.seek(offset)
+                stream.write(bytes((original[0] ^ mask,)))
+
+        before_boot = image_digest(boot_image)
+        before_victim = image_digest(victim_image)
+        victim_file = f"victim-file-{index}"
+        victim_raw = f"victim-raw-{index}"
+        boot_file = f"boot-file-{index}"
+        boot_raw = f"boot-raw-{index}"
+        storage = [
+            *blockdev(
+                {
+                    "driver": "file",
+                    "filename": str(victim_image),
+                    "node-name": victim_file,
+                }
+            ),
+            *blockdev(
+                {"driver": "raw", "file": victim_file, "node-name": victim_raw}
+            ),
+            "-device",
+            f"ide-hd,drive={victim_raw},bus=ide.0,unit=0,bootindex=2",
+            *blockdev(
+                {
+                    "driver": "file",
+                    "filename": str(boot_image),
+                    "node-name": boot_file,
+                }
+            ),
+            *blockdev(
+                {"driver": "raw", "file": boot_file, "node-name": boot_raw}
+            ),
+            "-device",
+            f"ide-hd,drive={boot_raw},bus=ide.1,unit=0,bootindex=1",
+        ]
+        vm = VirtualMachine(
+            boot_image,
+            temp / f"session-wrong-device-{label}.log",
+            qemu,
+            -3 - index,
+            storage,
+        )
+        try:
+            vm.start(
+                "MINI_OS: boot device does not match primary ATA master; writes refused."
+            )
+        finally:
+            vm.stop()
+
+        if image_digest(boot_image) != before_boot:
+            raise RuntimeError(f"{label} mismatch modified the actual boot image")
+        if image_digest(victim_image) != before_victim:
+            raise RuntimeError(f"{label} mismatch modified the primary-master image")
+        check_image(checker, boot_image, repo)
+        check_image(checker, victim_image, repo)
+
+
+def invalid_filesystem_boot_test(source: Path, qemu: str, temp: Path) -> None:
+    image = temp / "invalid-filesystem.img"
+    shutil.copy2(source, image)
+    with image.open("r+b") as stream:
+        stream.seek(SUPERBLOCK_LBA * 512)
+        stream.write(b"BAD!")
+    before = image_digest(image)
+    vm = VirtualMachine(image, temp / "session-invalid-filesystem.log", qemu, -4)
+    try:
+        vm.start("MINI_OS: filesystem unavailable; system halted.")
+    finally:
+        vm.stop()
+    if image_digest(image) != before:
+        raise RuntimeError("invalid filesystem was modified during startup")
+
+
+def explicit_format_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "explicit-format.img"
+    shutil.copy2(source, image)
+    vm = VirtualMachine(image, temp / "session-explicit-format.log", qemu, -5)
+    try:
+        vm.start()
+        vm.command_expect("touch doomed", "Created: doomed")
+        vm.command_expect("format", "MINI_OS: format complete.")
+        start = vm.send_command("ls")
+        segment = vm.wait_for("/ > ", start, COMMAND_TIMEOUT)
+        if "README.TXT (f)" not in segment:
+            raise RuntimeError("explicit format did not recreate README.TXT")
+        if "transport (d)" in segment or "doomed (f)" in segment:
+            raise RuntimeError("explicit format retained old filesystem entries")
+    finally:
+        vm.stop()
+    check_image(checker, image, repo)
+
+    reboot = VirtualMachine(image, temp / "session-format-reboot.log", qemu, -6)
+    try:
+        reboot.start()
+        reboot.command_expect("cat README.TXT", "Welcome to MINI_OS.")
+    finally:
+        reboot.stop()
+    check_image(checker, image, repo)
+
+
+def mutation_fault_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "mutation-fault.img"
+    config = temp / "mutation-fault.blkdebug"
+    shutil.copy2(source, image)
+    config.write_text(
+        '[inject-error]\n'
+        'event = "pwritev"\n'
+        'errno = "5"\n'
+        'sector = "103"\n'
+        'once = "on"\n'
+        'immediately = "on"\n',
+        encoding="ascii",
+    )
+    storage = [
+        *blockdev({"driver": "file", "filename": str(image), "node-name": "fault-file"}),
+        *blockdev(
+            {
+                "driver": "blkdebug",
+                "image": "fault-file",
+                "config": str(config),
+                "node-name": "fault-debug",
+            }
+        ),
+        *blockdev({"driver": "raw", "file": "fault-debug", "node-name": "fault-raw"}),
+        "-device",
+        "ide-hd,drive=fault-raw,bus=ide.0,unit=0",
+    ]
+    vm = VirtualMachine(
+        image, temp / "session-mutation-fault.log", qemu, -7, storage
+    )
+    try:
+        vm.start()
+        vm.command_expect(
+            "rm README.TXT",
+            "Filesystem I/O failed; filesystem writes are disabled.",
+        )
+        vm.command_expect(
+            "touch blocked",
+            "Filesystem I/O failed; filesystem writes are disabled.",
+        )
+    finally:
+        vm.stop()
+
+    expect_image_rejected(
+        checker, image, repo, "filesystem has an unfinished mutation"
+    )
+    reboot = VirtualMachine(image, temp / "session-mutation-reboot.log", qemu, -8)
+    try:
+        reboot.start("MINI_OS: filesystem unavailable; system halted.")
+    finally:
+        reboot.stop()
+
+
+def read_fault_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "read-fault.img"
+    config = temp / "read-fault.blkdebug"
+    shutil.copy2(source, image)
+    before = image_digest(image)
+    config.write_text(
+        '[inject-error]\n'
+        'event = "read_aio"\n'
+        'errno = "5"\n'
+        'sector = "378"\n'
+        'once = "on"\n'
+        'immediately = "on"\n',
+        encoding="ascii",
+    )
+    storage = [
+        *blockdev({"driver": "file", "filename": str(image), "node-name": "read-file"}),
+        *blockdev(
+            {
+                "driver": "blkdebug",
+                "image": "read-file",
+                "config": str(config),
+                "node-name": "read-debug",
+            }
+        ),
+        *blockdev({"driver": "raw", "file": "read-debug", "node-name": "read-raw"}),
+        "-device",
+        "ide-hd,drive=read-raw,bus=ide.0,unit=0",
+    ]
+    vm = VirtualMachine(image, temp / "session-read-fault.log", qemu, -9, storage)
+    try:
+        vm.start()
+        vm.command_expect(
+            "cat README.TXT",
+            "Filesystem I/O failed; filesystem writes are disabled.",
+        )
+        vm.command_expect(
+            "touch blocked",
+            "Filesystem I/O failed; filesystem writes are disabled.",
+        )
+    finally:
+        vm.stop()
+    if image_digest(image) != before:
+        raise RuntimeError("read failure or blocked mutation changed the image")
+    check_image(checker, image, repo)
+
+    reboot = VirtualMachine(image, temp / "session-read-fault-reboot.log", qemu, -10)
+    try:
+        reboot.start()
+        reboot.command_expect("touch recovered", "Created: recovered")
+        reboot.command_expect("rm recovered", "Removed.")
+    finally:
+        reboot.stop()
+    check_image(checker, image, repo)
+
+
+def partial_no_space_test(
+    repo: Path, checker: Path, source: Path, qemu: str, temp: Path
+) -> None:
+    image = temp / "partial-no-space.img"
+    host_source = temp / "space-fill-source"
+    filler = host_source / "fill.bin"
+    injector = checker.parent / "inject_transport"
+    shutil.copy2(source, image)
+    host_source.mkdir()
+
+    free_before = count_free_data_blocks(image)
+    if free_before < 3:
+        raise RuntimeError("source image has too few blocks for no-space setup")
+    with filler.open("wb") as stream:
+        stream.truncate((free_before - 2) * 512)
+    run_checked(
+        [str(injector), str(image), str(host_source), "spacefill"], repo
+    )
+    if count_free_data_blocks(image) != 1:
+        raise RuntimeError("no-space setup did not leave exactly one data block")
+    check_image(checker, image, repo)
+
+    vm = VirtualMachine(image, temp / "session-partial-no-space.log", qemu, -11)
+    try:
+        vm.start()
+        start = vm.send_command(
+            "run /transport/build/lib_test/test_no_space.bin"
+        )
+        vm.wait_for("NO-SPACE DIRTY TEST: PASS", start, 30.0)
+    finally:
+        vm.stop()
+
+    expect_image_rejected(
+        checker, image, repo, "filesystem has an unfinished mutation"
+    )
+    reboot = VirtualMachine(image, temp / "session-no-space-reboot.log", qemu, -12)
+    try:
+        reboot.start("MINI_OS: filesystem unavailable; system halted.")
+    finally:
+        reboot.stop()
 
 
 def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> None:
@@ -289,6 +707,8 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
             raise RuntimeError("cross-sector file markers were not all read back")
         first.command_expect("mkdir e2e", "Directory created: e2e")
         first.command_expect("mv syslib.txt e2e/moved.txt", "Renamed.")
+        for index in range(14):
+            first.command_expect(f"touch root{index:02d}", f"Created: root{index:02d}")
         first.command_expect("cd e2e", "/e2e > ")
         first.command_expect("ls", "moved.txt (f)")
     finally:
@@ -302,9 +722,14 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
         segment = second.command_expect("cat /e2e/moved.txt", "E2E-APPEND")
         if "E2E-BEGIN" not in segment or "E2E-END" not in segment:
             raise RuntimeError("file contents did not survive a QEMU restart")
+        second.command_expect("ls", "root13 (f)")
+        for index in range(14):
+            second.command_expect(f"rm /root{index:02d}", "Removed.")
         second.command_expect("mv /e2e/moved.txt /persist.txt", "Renamed.")
         second.command_expect("rm /persist.txt", "Removed.")
         second.command_expect("rm /e2e", "Removed.")
+        second.command_expect("rm /README.TXT", "Removed.")
+        second.command_expect("touch /replacement", "Created: /replacement")
         start = second.send_command("ls")
         segment = second.wait_for("/ > ", start, COMMAND_TIMEOUT)
         if "e2e (d)" in segment or "persist.txt (f)" in segment:
@@ -312,15 +737,27 @@ def full_test(repo: Path, checker: Path, image: Path, qemu: str, temp: Path) -> 
     finally:
         second.stop()
 
+    with image.open("rb") as stream:
+        stream.seek(INODE_BITMAP_LBA * 512)
+        first_bitmap_byte = stream.read(1)
+    if len(first_bitmap_byte) != 1 or first_bitmap_byte[0] & 0x02 == 0:
+        raise RuntimeError("freed README inode 1 was not reused")
     check_image(checker, image, repo)
 
     third = VirtualMachine(image, temp / "session-3.log", qemu, 3)
     try:
         third.start()
+        third.command_expect("ls", "replacement (f)")
         start = third.send_command("ls")
         segment = third.wait_for("/ > ", start, COMMAND_TIMEOUT)
-        if "e2e (d)" in segment or "persist.txt (f)" in segment:
+        if (
+            "e2e (d)" in segment
+            or "persist.txt (f)" in segment
+            or "README.TXT (f)" in segment
+            or "root13 (f)" in segment
+        ):
             raise RuntimeError("removal did not survive a QEMU restart")
+        third.command_expect("rm /replacement", "Removed.")
     finally:
         third.stop()
 
@@ -356,6 +793,13 @@ def main() -> int:
         else:
             forced_chs_test(repo, checker, source_image, args.qemu, temp)
             prepare_debug_image(repo, source_image, debug_image)
+            machine_compatibility_test(repo, checker, debug_image, args.qemu, temp)
+            wrong_device_test(repo, checker, debug_image, args.qemu, temp)
+            invalid_filesystem_boot_test(debug_image, args.qemu, temp)
+            explicit_format_test(repo, checker, debug_image, args.qemu, temp)
+            mutation_fault_test(repo, checker, debug_image, args.qemu, temp)
+            read_fault_test(repo, checker, debug_image, args.qemu, temp)
+            partial_no_space_test(repo, checker, debug_image, args.qemu, temp)
             full_test(repo, checker, debug_image, args.qemu, temp)
 
     print("QEMU filesystem regression: PASS")

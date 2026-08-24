@@ -55,6 +55,7 @@ ata_read_sector_lba28:
     jmp .done
 
 .fail:
+    mov byte [fs_io_poisoned], 1
     stc
 .done:
     pop edi
@@ -73,6 +74,8 @@ ata_write_sector_lba28:
     push edx
     push esi
 
+    cmp byte [fs_io_poisoned], 0
+    jne .fail
     mov ebx, eax
     cmp ebx, 0x0FFFFFFF
     ja .fail
@@ -118,10 +121,15 @@ ata_write_sector_lba28:
     out dx, al
     call ata_wait_not_busy
     jc .fail
+    cmp byte [fs_mutation_active], 1
+    jne .success
+    mov byte [fs_mutation_touched], 1
+.success:
     clc
     jmp .done
 
 .fail:
+    mov byte [fs_io_poisoned], 1
     stc
 .done:
     pop esi

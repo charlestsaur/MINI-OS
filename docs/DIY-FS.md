@@ -1,12 +1,17 @@
 # MINI-OS Filesystem Format Notes
 
-This file explains the implementation choices behind the current format. Exact
-numeric values come from `OS_src/kernel/fs/layout.def`; the complete current
-contract is documented in `docs/Filesystem_Current.md`.
+This file explains the implementation choices behind the current format.
+
+Exact numeric values come from `OS_src/kernel/fs/layout.def`, and the complete current contract is documented in `docs/Filesystem_Current.md`.
 
 ## Metadata Regions
 
 The image reserves LBA 0 for the boot sector and LBA 1..100 for the kernel.
+
+Boot-sector bytes 504..509 hold a per-image 48-bit identity generated during image construction.
+
+The protected-mode ATA path must match that identity and immutable boot/kernel bytes before the filesystem can mount.
+
 Filesystem metadata begins at LBA 101:
 
 | Start LBA | Region | Length |
@@ -37,16 +42,36 @@ Path resolution starts at root for `/...` and at the current working directory o
 
 Protected-mode storage currently addresses the primary ATA channel's master device with LBA28 PIO. Each one-sector transfer:
 
-1. rejects an address outside LBA28;
-2. waits with a fixed bound for BSY to clear;
-3. fails on timeout, ERR, or DF;
-4. programs sector count, LBA, drive/head, and command;
-5. waits for DRQ before transferring 256 words;
-6. checks completion status, including cache-flush completion for writes.
+- rejects an address outside LBA28;
+- waits with a fixed bound for BSY to clear;
+- fails on timeout, ERR, or DF;
+- programs sector count, LBA, drive/head, and command;
+- waits for DRQ before transferring 256 words;
+- checks completion status, including cache-flush completion for writes.
 
 The helper returns carry clear on success and carry set on failure.
 
 Filesystem callers translate this into `FS_ERR_IO` and do not continue with invalid data.
+
+## Mutation Failure Contract
+
+The superblock dword at byte offset 24 is a persistent unfinished-mutation marker.
+
+Kernel create, move, remove, truncate, edit, format, and stream-write paths set it before their first metadata/data change and clear it only after the whole operation succeeds.
+
+A failure before any operation write may safely clear the marker, but any later failure after a successful operation write keeps it set.
+
+Any ATA read or write failure refuses new writes for the rest of that boot.
+
+If a mutation is active, its marker remains set.
+
+Mount and `check_image` reject the image on the next run.
+
+Earlier sectors may already have changed, so the contract is detection and fail-stop isolation rather than guaranteed rollback.
+
+The host injector instead mutates a same-directory temporary copy and exposes it only with a final atomic rename.
+
+A failed host injection leaves the original image unchanged.
 
 ## Validation Rule
 

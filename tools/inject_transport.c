@@ -1,7 +1,10 @@
 #define _DEFAULT_SOURCE
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,6 +12,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include "check_image.h"
 
 #define SECTOR_SIZE 512U
 #define FAT_EOC 0xFFFFU
@@ -39,8 +45,60 @@ typedef struct {
 } dir_entry_t;
 #pragma pack(pop)
 
+_Static_assert(FS_BOOT_ID_SIZE > 0U, "boot identity must not be empty");
+_Static_assert(FS_BOOT_ID_OFFSET + FS_BOOT_ID_SIZE <= 510U,
+               "boot identity must precede the boot signature");
+_Static_assert(FS_SUPER_DIRTY_OFFSET == 6U * sizeof(uint32_t),
+               "superblock dirty field index must match layout.def");
+_Static_assert(FS_SUPER_DIRTY_OFFSET + sizeof(uint32_t) <= SECTOR_SIZE,
+               "superblock dirty field must fit in its sector");
+
 static FILE *img_fp;
 static uint64_t img_size;
+static mode_t transaction_mode;
+
+#ifdef INJECT_FAULT_TEST
+static uint64_t sector_write_count;
+
+static int injected_write_failure(const char *phase, uint64_t sequence) {
+    const char *variable;
+    const char *setting;
+    char *end;
+    unsigned long long requested;
+
+    variable = strcmp(phase, "before") == 0 ?
+               "MINI_OS_INJECT_FAIL_BEFORE" : "MINI_OS_INJECT_FAIL_AFTER";
+    setting = getenv(variable);
+    if (setting == NULL || setting[0] == '\0') return 0;
+    errno = 0;
+    requested = strtoull(setting, &end, 10);
+    if (errno != 0 || end == setting || *end != '\0' || requested == 0ULL) {
+        fprintf(stderr, "Error: invalid %s value '%s'.\n", variable, setting);
+        return 1;
+    }
+    if ((uint64_t)requested != sequence) return 0;
+    errno = EIO;
+    fprintf(stderr,
+            "Injected %s-write failure at sector write %llu.\n",
+            phase, (unsigned long long)sequence);
+    return 1;
+}
+
+static int injected_final_failure(const char *phase) {
+    const char *setting;
+
+    setting = getenv("MINI_OS_INJECT_FAIL_FINAL");
+    if (setting == NULL || strcmp(setting, phase) != 0) return 0;
+    errno = EIO;
+    fprintf(stderr, "Injected final-%s failure.\n", phase);
+    return 1;
+}
+#else
+static int injected_final_failure(const char *phase) {
+    (void)phase;
+    return 0;
+}
+#endif
 
 static int block_valid(uint32_t block) {
     return block >= 2U && block < FS_DATA_BLOCK_COUNT;
@@ -72,6 +130,169 @@ static int checked_seek(FILE *fp, uint64_t offset, const char *what) {
     return 0;
 }
 
+static int open_transaction_image(const char *image_path, char **temp_path_out) {
+    static const char suffix[] = ".inject-XXXXXX";
+    FILE *source;
+    FILE *target;
+    struct stat path_status;
+    struct stat status;
+    char *temp_path;
+    uint8_t buffer[64U * 1024U];
+    size_t path_length;
+    size_t count;
+    long length;
+    int fd;
+    int result;
+
+    source = NULL;
+    target = NULL;
+    temp_path = NULL;
+    fd = -1;
+    result = -1;
+
+    if (lstat(image_path, &path_status) != 0 || !S_ISREG(path_status.st_mode)) {
+        fprintf(stderr, "Error: disk image '%s' is not a regular file.\n", image_path);
+        goto done;
+    }
+    source = fopen(image_path, "rb");
+    if (source == NULL) {
+        fprintf(stderr, "Error: cannot open disk image '%s': %s\n",
+                image_path, strerror(errno));
+        goto done;
+    }
+    if (fstat(fileno(source), &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_dev != path_status.st_dev || status.st_ino != path_status.st_ino) {
+        fprintf(stderr, "Error: disk image '%s' changed while being opened.\n", image_path);
+        goto done;
+    }
+    if (status.st_nlink != 1) {
+        fprintf(stderr,
+                "Error: disk image '%s' must not have multiple hard links.\n",
+                image_path);
+        goto done;
+    }
+    transaction_mode = status.st_mode & 07777;
+
+    path_length = strlen(image_path);
+    if (path_length > SIZE_MAX - sizeof(suffix)) {
+        fprintf(stderr, "Error: disk image path is too long.\n");
+        goto done;
+    }
+    temp_path = malloc(path_length + sizeof(suffix));
+    if (temp_path == NULL) {
+        fprintf(stderr, "Error: cannot allocate a temporary image path.\n");
+        goto done;
+    }
+    memcpy(temp_path, image_path, path_length);
+    memcpy(temp_path + path_length, suffix, sizeof(suffix));
+
+    fd = mkstemp(temp_path);
+    if (fd < 0) {
+        fprintf(stderr, "Error: cannot create temporary image: %s\n", strerror(errno));
+        goto done;
+    }
+    if (fchmod(fd, transaction_mode) != 0) {
+        fprintf(stderr, "Error: cannot preserve image permissions: %s\n", strerror(errno));
+        goto done;
+    }
+    target = fdopen(fd, "w+b");
+    if (target == NULL) {
+        fprintf(stderr, "Error: cannot open temporary image: %s\n", strerror(errno));
+        goto done;
+    }
+    fd = -1;
+
+    for (;;) {
+        count = fread(buffer, 1, sizeof(buffer), source);
+        if (count != 0U && fwrite(buffer, 1, count, target) != count) {
+            fprintf(stderr, "Error: cannot copy disk image: %s\n", strerror(errno));
+            goto done;
+        }
+        if (count < sizeof(buffer)) {
+            if (ferror(source)) {
+                fprintf(stderr, "Error: cannot read disk image: %s\n",
+                        strerror(errno));
+                goto done;
+            }
+            break;
+        }
+    }
+    if (fflush(target) != 0 || fsync(fileno(target)) != 0) {
+        fprintf(stderr, "Error: cannot flush temporary image: %s\n", strerror(errno));
+        goto done;
+    }
+    if (fseek(target, 0, SEEK_END) != 0 || (length = ftell(target)) < 0 ||
+        fseek(target, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "Error: cannot determine temporary image size.\n");
+        goto done;
+    }
+    if (fclose(source) != 0) {
+        source = NULL;
+        fprintf(stderr, "Error: cannot close source image: %s\n", strerror(errno));
+        goto done;
+    }
+    source = NULL;
+
+    img_fp = target;
+    img_size = (uint64_t)length;
+    *temp_path_out = temp_path;
+    return 0;
+
+done:
+    if (source != NULL) fclose(source);
+    if (target != NULL) fclose(target);
+    else if (fd >= 0) close(fd);
+    if (temp_path != NULL) {
+        unlink(temp_path);
+        free(temp_path);
+    }
+    return result;
+}
+
+static int finish_transaction_image(const char *image_path, char *temp_path,
+                                    int result) {
+    int close_result;
+
+    if (img_fp != NULL) {
+        if (result == 0 && (injected_final_failure("chmod") ||
+                            fchmod(fileno(img_fp), transaction_mode) != 0)) {
+            fprintf(stderr, "Error: cannot preserve image permissions: %s\n",
+                    strerror(errno));
+            result = -1;
+        }
+        if (result == 0 &&
+            (injected_final_failure("flush") || fflush(img_fp) != 0 ||
+             fsync(fileno(img_fp)) != 0)) {
+            fprintf(stderr, "Error: cannot flush completed image: %s\n", strerror(errno));
+            result = -1;
+        }
+        close_result = fclose(img_fp);
+        img_fp = NULL;
+        if (result == 0 && injected_final_failure("close")) close_result = EOF;
+        if (close_result != 0) {
+            fprintf(stderr, "Error: cannot close temporary image: %s\n", strerror(errno));
+            result = -1;
+        }
+    }
+    if (result == 0 && (injected_final_failure("check") ||
+                        check_image_path(temp_path, 0) != 0)) {
+        fprintf(stderr,
+                "Error: completed temporary image failed the integrity check.\n");
+        result = -1;
+    }
+    if (result == 0 && (injected_final_failure("rename") ||
+                        rename(temp_path, image_path) != 0)) {
+        fprintf(stderr, "Error: cannot commit completed image: %s\n", strerror(errno));
+        result = -1;
+    }
+    if (result != 0 && unlink(temp_path) != 0 && errno != ENOENT) {
+        fprintf(stderr, "Error: cannot remove temporary image '%s': %s\n",
+                temp_path, strerror(errno));
+    }
+    free(temp_path);
+    return result;
+}
+
 static int read_sector(uint32_t lba, void *buffer) {
     uint64_t offset;
 
@@ -94,6 +315,11 @@ static int read_sector(uint32_t lba, void *buffer) {
 static int write_sector(uint32_t lba, const void *buffer) {
     uint64_t offset;
 
+#ifdef INJECT_FAULT_TEST
+    sector_write_count++;
+    if (injected_write_failure("before", sector_write_count)) return -1;
+#endif
+
     if (lba >= FS_TOTAL_SECTORS) {
         fprintf(stderr, "Error: sector write LBA %u exceeds filesystem geometry.\n", lba);
         return -1;
@@ -111,7 +337,64 @@ static int write_sector(uint32_t lba, const void *buffer) {
         fprintf(stderr, "Error: cannot flush image LBA %u: %s\n", lba, strerror(errno));
         return -1;
     }
+#ifdef INJECT_FAULT_TEST
+    if (injected_write_failure("after", sector_write_count)) return -1;
+#endif
     return 0;
+}
+
+static int boot_id_is_zero(const uint8_t id[FS_BOOT_ID_SIZE]) {
+    uint32_t i;
+
+    for (i = 0; i < FS_BOOT_ID_SIZE; i++) {
+        if (id[i] != 0U) return 0;
+    }
+    return 1;
+}
+
+static int generate_boot_id(uint8_t id[FS_BOOT_ID_SIZE]) {
+    size_t complete;
+    ssize_t count;
+    int random_fd;
+
+    random_fd = open("/dev/urandom", O_RDONLY);
+    if (random_fd < 0) {
+        fprintf(stderr, "Error: cannot open host random source: %s\n", strerror(errno));
+        return -1;
+    }
+    complete = 0U;
+    while (complete < FS_BOOT_ID_SIZE) {
+        count = read(random_fd, id + complete, FS_BOOT_ID_SIZE - complete);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            fprintf(stderr, "Error: cannot read host random source: %s\n",
+                    count < 0 ? strerror(errno) : "unexpected end of file");
+            close(random_fd);
+            return -1;
+        }
+        complete += (size_t)count;
+    }
+    if (close(random_fd) != 0) {
+        fprintf(stderr, "Error: cannot close host random source: %s\n", strerror(errno));
+        return -1;
+    }
+    if (boot_id_is_zero(id)) id[0] = 1U;
+    return 0;
+}
+
+static int ensure_boot_id(void) {
+    uint8_t sector[SECTOR_SIZE];
+    uint8_t id[FS_BOOT_ID_SIZE];
+
+    if (read_sector(0U, sector) < 0) return -1;
+    if (sector[510] != 0x55U || sector[511] != 0xAAU) {
+        fprintf(stderr, "Error: boot sector signature is invalid.\n");
+        return -1;
+    }
+    if (!boot_id_is_zero(sector + FS_BOOT_ID_OFFSET)) return 0;
+    if (generate_boot_id(id) < 0) return -1;
+    memcpy(sector + FS_BOOT_ID_OFFSET, id, sizeof(id));
+    return write_sector(0U, sector);
 }
 
 static int bitmap_test(uint32_t bit_index, int *is_set) {
@@ -326,7 +609,7 @@ static int alloc_inode(uint32_t *inode_out) {
     uint32_t index;
     int is_set;
 
-    for (index = 2U; index < FS_INODE_COUNT; index++) {
+    for (index = 1U; index < FS_INODE_COUNT; index++) {
         if (bitmap_test(index, &is_set) < 0) return -1;
         if (!is_set) {
             if (bitmap_update(index, 1) < 0) return -1;
@@ -692,17 +975,26 @@ static int process_directory_tree(uint32_t target_inode, const char *host_path) 
 }
 
 static int superblock_matches_layout(const uint8_t sector[SECTOR_SIZE]) {
-    uint32_t values[6];
+    uint32_t values[7];
 
     memcpy(values, sector, sizeof(values));
     return values[0] == FS_MAGIC && values[1] == FS_INODE_COUNT &&
            values[2] == FS_DATA_BLOCK_COUNT && values[3] == FS_INODE_START_LBA &&
-           values[4] == FS_DATA_START_LBA && values[5] == 0U;
+           values[4] == FS_DATA_START_LBA && values[5] == 0U && values[6] == 0U;
+}
+
+static int sector_is_zero(const uint8_t sector[SECTOR_SIZE]) {
+    uint32_t i;
+
+    for (i = 0; i < SECTOR_SIZE; i++) {
+        if (sector[i] != 0U) return 0;
+    }
+    return 1;
 }
 
 static int format_fresh_filesystem(void) {
     uint8_t sector[SECTOR_SIZE];
-    uint32_t superblock[6];
+    uint32_t superblock[7];
     uint32_t i;
     uint32_t root_block;
     uint32_t readme_block;
@@ -730,6 +1022,7 @@ static int format_fresh_filesystem(void) {
     superblock[3] = FS_INODE_START_LBA;
     superblock[4] = FS_DATA_START_LBA;
     superblock[5] = 0U;
+    superblock[6] = 0U;
     memset(sector, 0, sizeof(sector));
     memcpy(sector, superblock, sizeof(superblock));
     if (write_sector(FS_SUPERBLOCK_LBA, sector) < 0 ||
@@ -800,7 +1093,7 @@ int main(int argc, char **argv) {
     const char *image_path;
     const char *host_directory;
     const char *target_name;
-    long size;
+    char *temp_path;
     uint8_t superblock[SECTOR_SIZE];
     uint32_t target_inode;
     int result;
@@ -818,39 +1111,39 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    img_fp = fopen(image_path, "rb+");
-    if (img_fp == NULL) {
-        fprintf(stderr, "Error: cannot open disk image '%s': %s\n", image_path, strerror(errno));
-        return 1;
-    }
-    if (fseek(img_fp, 0, SEEK_END) != 0 || (size = ftell(img_fp)) < 0) {
-        fprintf(stderr, "Error: cannot determine image size.\n");
-        fclose(img_fp);
-        return 1;
-    }
-    img_size = (uint64_t)size;
-    if (validate_geometry() < 0 || read_sector(FS_SUPERBLOCK_LBA, superblock) < 0) {
-        fclose(img_fp);
-        return 1;
+    temp_path = NULL;
+    if (open_transaction_image(image_path, &temp_path) < 0) return 1;
+    result = -1;
+    if (validate_geometry() < 0 || ensure_boot_id() < 0 ||
+        read_sector(FS_SUPERBLOCK_LBA, superblock) < 0) {
+        goto done;
     }
 
     if (!superblock_matches_layout(superblock)) {
+        if (!sector_is_zero(superblock)) {
+            fprintf(stderr,
+                    "Error: filesystem superblock is invalid or has an unfinished mutation.\n");
+            goto done;
+        }
         if (format_fresh_filesystem() < 0) {
-            fclose(img_fp);
-            return 1;
+            goto done;
         }
     } else {
-        printf("MINI-OS filesystem verified. Injecting '%s' at '/%s'.\n",
+        printf("MINI-OS filesystem recognized. Injecting '%s' at '/%s'.\n",
                host_directory, target_name);
     }
 
     result = get_or_create_directory(0U, target_name, &target_inode);
     if (result == 0) result = process_directory_tree(target_inode, host_directory);
-    if (result < 0) fprintf(stderr, "Injection failed; the disk image is incomplete.\n");
-    if (fclose(img_fp) != 0) {
-        fprintf(stderr, "Error: cannot close disk image: %s\n", strerror(errno));
-        result = -1;
+done:
+#ifdef INJECT_FAULT_TEST
+    fprintf(stderr, "Fault-test sector writes: %llu\n",
+            (unsigned long long)sector_write_count);
+#endif
+    if (result < 0) {
+        fprintf(stderr, "Injection failed; the original disk image is unchanged.\n");
     }
+    result = finish_transaction_image(image_path, temp_path, result);
     if (result < 0) return 1;
     printf("Injection complete.\n");
     return 0;

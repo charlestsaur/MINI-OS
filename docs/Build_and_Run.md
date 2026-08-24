@@ -12,7 +12,7 @@ Required tools:
 - `ld.lld` when available; otherwise the checked `elf2bin` fallback is selected
 - `qemu-system-i386`
 - shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
-- `python3` for the automated build and QEMU tests
+- Python 3.9 or newer for the automated build and QEMU tests
 
 ## 2. Source and Output Paths
 
@@ -45,17 +45,29 @@ make
 
 What happens:
 
-1. Build the modern-C host tools and runtime library.
-2. Compile every application and test with strict C90 diagnostics.
-3. Link each flat binary with `ld.lld`, or automatically use `elf2bin` when `ld.lld` is unavailable.
-4. Assemble the kernel and compute its boot-time sector count.
-5. Create a raw image of exactly 4,471 sectors, derived from the shared `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
-6. Assert the resulting byte size, write boot/kernel sectors, validate the same geometry in the injector, and inject the sorted `transport/` tree.
-7. Run `build/check_image` as a mandatory final step. Any invalid geometry, inode, FAT chain, duplicate ownership, unreachable allocation, or directory inconsistency fails the image build.
+- Build the modern-C host tools and runtime library.
+- Compile every application and test with strict C90 diagnostics.
+- Link each flat binary with `ld.lld`, or automatically use `elf2bin` when `ld.lld` is unavailable.
+- Assemble the kernel and compute its boot-time sector count.
+- Create a raw image of exactly 4,471 sectors from the shared `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
+- Assert the resulting byte size and write the boot and kernel sectors.
+- Assign a nonzero 48-bit image identity, initialize a zeroed fresh filesystem, and inject the sorted `transport/` tree in a same-directory temporary copy.
+- Flush, close, and fully validate the copy before atomically renaming it over the image.
+- Run `build/check_image` as a mandatory final step, and fail the image build for any invalid identity, unfinished mutation, geometry, inode, FAT chain, duplicate ownership, unreachable allocation, or directory inconsistency.
 
 Host metadata such as `.DS_Store`, `._*`, `Thumbs.db`, and `.git` is excluded.
 
 An image or host-file I/O failure makes the injector and build return nonzero.
+
+On any injector failure, including a failure reported after a sector flush or by the full pre-rename integrity gate, the original image remains byte-for-byte unchanged.
+
+The temporary copy is removed when cleanup succeeds, and a cleanup failure is reported.
+
+A nonzero invalid or unfinished superblock is rejected rather than being reformatted.
+
+The injector requires a regular non-symlink target with exactly one hard link, preserves its permission bits, and assumes that no other process concurrently replaces it.
+
+An abrupt process or host shutdown can leave an uncommitted `.inject-*` sidecar, which does not replace the target and may be removed after confirming that no injector is running.
 
 To build one application:
 
@@ -77,7 +89,11 @@ Equivalent current action:
 qemu-system-i386 -drive file=build/mini_os.img,format=raw,if=ide,index=0,media=disk
 ```
 
-The explicit IDE index is part of the current driver contract: after the BIOS loads the kernel, protected-mode filesystem I/O addresses the primary ATA channel's master device directly.
+The explicit IDE index is part of the current driver contract because protected-mode filesystem I/O addresses the primary ATA channel's master device directly after the BIOS loads the kernel.
+
+Before mounting, the kernel compares the boot-code prefix, per-image identity, and an immutable kernel-code sample with that target.
+
+A mismatch halts without writes.
 
 ## 5. Kernel Size Guard and Boot Reads
 
@@ -115,8 +131,8 @@ Symptom: image write or cleanup commands fail.
 
 ```bash
 make check-image  # verify the current generated image
-make test-build   # clean/incremental/language/dependency/linker checks
-make test-e2e     # full QEMU filesystem and persistence regression
+make test-build   # build policy, corruption rejection, and host write-fault transaction checks
+make test-e2e     # QEMU filesystem, persistence, disk-fault, device-safety, and boot-matrix checks
 make test         # all automated gates
 ```
 

@@ -313,6 +313,14 @@ syscall_entry:
     test dword [tmp_open_flags], SYS_OPEN_TRUNCATE
     jz .sys_open_skip_truncate
 
+    push esi
+    push edi
+    call fs_begin_mutation
+    pop edi
+    pop esi
+    cmp eax, FS_OK
+    jl near .sys_open_fs_fail
+
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     je .sys_open_empty_inode
 
@@ -323,19 +331,19 @@ syscall_entry:
     dec ebx
     call fs_fat_get_nth_block
     cmp eax, FS_OK
-    jl near .sys_open_fs_fail
+    jl near .sys_open_truncate_fail
 
     mov eax, [BUF_INODE + INODE_START_OFF]
     call fs_fat_read_entry
     cmp eax, FS_OK
-    jl near .sys_open_fs_fail
+    jl near .sys_open_truncate_fail
     mov [tmp_chain_next], eax
 
     mov eax, [BUF_INODE + INODE_START_OFF]
     mov ebx, FS_FAT_EOC
     call fs_fat_write_entry
     cmp eax, FS_OK
-    jl near .sys_open_fs_fail
+    jl near .sys_open_truncate_fail
 
     mov dword [BUF_INODE + INODE_SIZE_OFF], 0
     mov dword [BUF_INODE + INODE_BLOCKS_OFF], 1
@@ -352,7 +360,7 @@ syscall_entry:
     dec ecx
     call fs_fat_free_chain
     cmp eax, FS_OK
-    jl near .sys_open_fs_fail
+    jl near .sys_open_truncate_fail
 
 .sys_open_zero_first:
     mov eax, [BUF_INODE + INODE_START_OFF]
@@ -367,8 +375,8 @@ syscall_entry:
     mov esi, BUF_SECTOR
     call ata_write_sector_lba28
     pop esi
-    jc near .sys_open_fs_fail
-    jmp .sys_open_skip_truncate
+    jc near .sys_open_truncate_fail
+    jmp .sys_open_truncate_done
 
 .sys_open_empty_inode:
     mov dword [BUF_INODE + INODE_SIZE_OFF], 0
@@ -376,13 +384,25 @@ syscall_entry:
     mov esi, BUF_INODE
     call fs_write_inode
     cmp eax, FS_OK
-    jl near .sys_open_fs_fail
-    jmp .sys_open_skip_truncate
+    jl near .sys_open_truncate_fail
+    jmp .sys_open_truncate_done
 
 .sys_open_restore_fat:
     mov eax, [BUF_INODE + INODE_START_OFF]
     mov ebx, [tmp_chain_next]
     call fs_fat_write_entry
+    jmp .sys_open_truncate_fail
+
+.sys_open_truncate_done:
+    mov eax, FS_OK
+    call fs_complete_mutation
+    cmp eax, FS_OK
+    jl near .sys_open_fs_fail
+    jmp .sys_open_skip_truncate
+
+.sys_open_truncate_fail:
+    mov eax, FS_ERR_IO
+    call fs_complete_mutation
     jmp near .sys_open_fs_fail
 
 .sys_open_skip_truncate:
@@ -610,6 +630,14 @@ syscall_entry:
     cmp dword [tmp_rw_request], eax
     ja near .sys_wf_range
 
+    push esi
+    push edi
+    call fs_begin_mutation
+    pop edi
+    pop esi
+    cmp eax, FS_OK
+    jl near .sys_wf_err
+
     cmp dword [BUF_INODE + INODE_BLOCKS_OFF], 0
     jne near .sys_wf_has_block
 
@@ -728,7 +756,7 @@ syscall_entry:
     mov edi, BUF_SECTOR
     call ata_read_sector_lba28
     mov edi, ebx
-    jc near .sys_wf_err
+    jc near .sys_wf_io_err
 
     mov ebx, esi
     and ebx, 511
@@ -761,7 +789,7 @@ syscall_entry:
     call ata_write_sector_lba28
     pop esi
     pop eax
-    jc near .sys_wf_err
+    jc near .sys_wf_io_err
 
     add edi, edx
     add esi, edx
@@ -786,6 +814,10 @@ syscall_entry:
     cmp eax, FS_OK
     jl near .sys_wf_err
 
+    mov eax, FS_OK
+    call fs_complete_mutation
+    cmp eax, FS_OK
+    jl .sys_wf_complete_error
     mov eax, [tmp_rw_done]
     jmp near .sys_wf_exit
 
@@ -801,7 +833,17 @@ syscall_entry:
 .sys_wf_range:
     mov eax, SYS_ERR_RANGE
     jmp .sys_wf_exit
+.sys_wf_io_err:
+    mov eax, FS_ERR_IO
 .sys_wf_err:
+    cmp byte [fs_mutation_active], 1
+    jne .sys_wf_map_error
+    call fs_complete_mutation
+.sys_wf_map_error:
+    mov eax, SYS_ERR_IO
+    jmp .sys_wf_exit
+
+.sys_wf_complete_error:
     mov eax, SYS_ERR_IO
 
 .sys_wf_exit:

@@ -7,7 +7,7 @@ fs_alloc_inode:
     push ebx
     push ecx
 
-    mov ecx, 2
+    mov ecx, 1
 .loop:
     cmp ecx, FS_INODE_COUNT
     jge .full

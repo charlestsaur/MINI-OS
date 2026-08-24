@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "check_image.h"
+
 #define SECTOR_SIZE 512U
 #define FAT_EOC 0xFFFFU
 #define INODE_NAME_CAP 27U
@@ -37,6 +39,13 @@ typedef struct {
 
 _Static_assert(sizeof(inode_t) == 64U, "inode layout must remain 64 bytes");
 _Static_assert(sizeof(dir_entry_t) == 32U, "directory entry must remain 32 bytes");
+_Static_assert(FS_BOOT_ID_SIZE > 0U, "boot identity must not be empty");
+_Static_assert(FS_BOOT_ID_OFFSET + FS_BOOT_ID_SIZE <= 510U,
+               "boot identity must precede the boot signature");
+_Static_assert(FS_SUPER_DIRTY_OFFSET == 6U * sizeof(uint32_t),
+               "superblock dirty field index must match layout.def");
+_Static_assert(FS_SUPER_DIRTY_OFFSET + sizeof(uint32_t) <= SECTOR_SIZE,
+               "superblock dirty field must fit in its sector");
 
 static FILE *image;
 static uint64_t image_size;
@@ -115,8 +124,19 @@ static int names_equal_ci(const char *left, const char *right) {
 
 static int load_metadata(void) {
     uint8_t sector[SECTOR_SIZE];
-    uint32_t superblock[6];
+    uint32_t superblock[7];
     uint32_t i;
+    int boot_id_nonzero;
+
+    if (read_lba(0U, sector) < 0) return -1;
+    if (sector[510] != 0x55U || sector[511] != 0xAAU) {
+        return fail("boot sector signature is invalid");
+    }
+    boot_id_nonzero = 0;
+    for (i = 0; i < FS_BOOT_ID_SIZE; i++) {
+        if (sector[FS_BOOT_ID_OFFSET + i] != 0U) boot_id_nonzero = 1;
+    }
+    if (!boot_id_nonzero) return fail("boot volume ID is missing");
 
     if (read_lba(FS_SUPERBLOCK_LBA, sector) < 0) return -1;
     memcpy(superblock, sector, sizeof(superblock));
@@ -125,6 +145,9 @@ static int load_metadata(void) {
         superblock[3] != FS_INODE_START_LBA ||
         superblock[4] != FS_DATA_START_LBA || superblock[5] != 0U) {
         return fail("superblock does not match layout.def");
+    }
+    if (superblock[6] != 0U) {
+        return fail("filesystem has an unfinished mutation");
     }
 
     if (read_lba(FS_INODE_BMAP_LBA, inode_bitmap) < 0) return -1;
@@ -273,6 +296,7 @@ static int walk_directory(uint32_t inode_index) {
     uint32_t i;
     const dir_entry_t *entry;
     const inode_t *child_inode;
+    int result;
 
     if (visit_state[inode_index] == 1U) return fail_index("directory cycle reaches inode:", inode_index);
     if (visit_state[inode_index] == 2U) return 0;
@@ -285,29 +309,37 @@ static int walk_directory(uint32_t inode_index) {
     if (name_capacity > FS_INODE_COUNT) name_capacity = FS_INODE_COUNT;
     seen_names = calloc(name_capacity, sizeof(*seen_names));
     if (seen_names == NULL) return fail("cannot allocate directory name table");
+    result = -1;
 
     for (block_index = 0; block_index < directory->blocks_cnt; block_index++) {
-        if (read_lba(FS_DATA_START_LBA + current, entries) < 0) return -1;
+        if (read_lba(FS_DATA_START_LBA + current, entries) < 0) goto done;
         for (entry_index = 0; entry_index < DIR_ENTRY_COUNT; entry_index++) {
             entry = &entries[entry_index];
             if (entry->child_inode == 0U) {
-                if (!empty_entry_is_zero(entry)) return fail_index("malformed empty directory entry in inode:", inode_index);
+                if (!empty_entry_is_zero(entry)) {
+                    fail_index("malformed empty directory entry in inode:", inode_index);
+                    goto done;
+                }
                 continue;
             }
             child = entry->child_inode;
             if (child >= FS_INODE_COUNT || !bitmap_is_set(child)) {
-                return fail_index("directory references an unallocated inode:", child);
+                fail_index("directory references an unallocated inode:", child);
+                goto done;
             }
             if (!name_valid(entry->child_name)) {
-                return fail_index("directory entry has an invalid name in inode:", inode_index);
+                fail_index("directory entry has an invalid name in inode:", inode_index);
+                goto done;
             }
             for (i = 0; i < seen_count; i++) {
                 if (names_equal_ci(seen_names[i], entry->child_name)) {
-                    return fail_index("directory contains a duplicate name in inode:", inode_index);
+                    fail_index("directory contains a duplicate name in inode:", inode_index);
+                    goto done;
                 }
             }
             if (seen_count == name_capacity) {
-                return fail_index("directory contains too many live entries:", inode_index);
+                fail_index("directory contains too many live entries:", inode_index);
+                goto done;
             }
             memcpy(seen_names[seen_count], entry->child_name, INODE_NAME_CAP);
             seen_count++;
@@ -316,18 +348,24 @@ static int walk_directory(uint32_t inode_index) {
             if (entry->child_type != child_inode->type ||
                 strcmp(entry->child_name, child_inode->name) != 0 ||
                 child_inode->parent != inode_index) {
-                return fail_index("directory entry disagrees with child inode:", child);
+                fail_index("directory entry disagrees with child inode:", child);
+                goto done;
             }
             link_count[child]++;
-            if (link_count[child] != 1U) return fail_index("inode has multiple directory links:", child);
+            if (link_count[child] != 1U) {
+                fail_index("inode has multiple directory links:", child);
+                goto done;
+            }
             reachable[child] = 1U;
-            if (child_inode->type == 2U && walk_directory(child) < 0) return -1;
+            if (child_inode->type == 2U && walk_directory(child) < 0) goto done;
         }
         if (block_index + 1U < directory->blocks_cnt) current = fat[current];
     }
     visit_state[inode_index] = 2U;
+    result = 0;
+done:
     free(seen_names);
-    return 0;
+    return result;
 }
 
 static int validate_reachability(void) {
@@ -346,17 +384,23 @@ static int validate_reachability(void) {
     return 0;
 }
 
-int main(int argc, char **argv) {
+int check_image_path(const char *path, int verbose) {
     long length;
     int close_result;
 
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <mini_os.img>\n", argv[0]);
-        return 2;
-    }
-    image = fopen(argv[1], "rb");
+    memset(inode_bitmap, 0, sizeof(inode_bitmap));
+    memset(fat, 0, sizeof(fat));
+    memset(inodes, 0, sizeof(inodes));
+    memset(block_owner, 0, sizeof(block_owner));
+    memset(reachable, 0, sizeof(reachable));
+    memset(visit_state, 0, sizeof(visit_state));
+    memset(link_count, 0, sizeof(link_count));
+    allocated_inode_count = 0U;
+    owned_block_count = 0U;
+
+    image = fopen(path, "rb");
     if (image == NULL) {
-        fprintf(stderr, "check_image: cannot open '%s': %s\n", argv[1], strerror(errno));
+        fprintf(stderr, "check_image: cannot open '%s': %s\n", path, strerror(errno));
         return 1;
     }
     if (fseek(image, 0, SEEK_END) != 0 || (length = ftell(image)) < 0) {
@@ -384,7 +428,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "check_image: close failed: %s\n", strerror(errno));
         return 1;
     }
-    printf("Image integrity OK: %u reachable inodes, %u owned data blocks.\n",
-           allocated_inode_count, owned_block_count);
+    if (verbose) {
+        printf("Image integrity OK: %u reachable inodes, %u owned data blocks.\n",
+               allocated_inode_count, owned_block_count);
+    }
     return 0;
 }
+
+#ifndef CHECK_IMAGE_LIBRARY
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <mini_os.img>\n", argv[0]);
+        return 2;
+    }
+    return check_image_path(argv[1], 1);
+}
+#endif

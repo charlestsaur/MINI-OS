@@ -7,6 +7,16 @@
 KERNEL_LOAD_SEG equ 0x0800
 KERNEL_ENTRY    equ 0x8000
 
+%define FS_LAYOUT_CONST(name, value) name equ value
+%include "OS_src/kernel/fs/layout.def"
+%undef FS_LAYOUT_CONST
+%if FS_BOOT_ID_SIZE <= 0
+    %error "boot image identity must not be empty"
+%endif
+%if FS_BOOT_ID_OFFSET + FS_BOOT_ID_SIZE > 510
+    %error "boot image identity overlaps the BIOS signature"
+%endif
+
 %ifndef KERNEL_SECTORS
 KERNEL_SECTORS  equ 32
 %endif
@@ -288,5 +298,10 @@ disk_packet:
     dd 1
     dd 0
 
+; The host image builder replaces this zero placeholder with a per-image ID.
+; It is never modified by the boot code, so the kernel can compare the BIOS
+; booted image with the protected-mode ATA target before mounting it.
+times FS_BOOT_ID_OFFSET-($-$$) db 0
+boot_volume_id times FS_BOOT_ID_SIZE db 0
 times 510-($-$$) db 0
 dw 0xaa55
