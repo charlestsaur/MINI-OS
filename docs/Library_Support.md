@@ -2,6 +2,8 @@
 
 `transport/lib/minilibc.c` is a modern-C implementation of a deliberately limited application runtime. Applications under `transport/apps/` and `transport/lib_test/` consume its headers while compiling as strict C90. Header names resemble standard C headers, but this is not a complete ANSI C90 library.
 
+`transport/lib/compiler_rt.c` is also modern C and deliberately supplies the selected network build's unsigned 64-bit division and remainder helpers, but it is linked only into named network applications rather than the common runtime.
+
 ## Support Matrix
 
 “Direct” means a checked-in executable test asserts the API's result or state.
@@ -17,7 +19,7 @@
 | File streams | `fopen`, `fclose`, `fread`, `fwrite`, `fseek`, `ftell`, `rewind`, `fflush`, `feof`, `ferror` | direct | modes `r/w/a`, optional `+` and ignored `b`; unbuffered; 13 simultaneous app file descriptors; no `clearerr`, `remove`, `rename`, or temporary-file APIs |
 | Memory/string | `memset`, `memcpy`, `memmove`, `memcmp`, `memchr`, `strlen`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strcmp`, `strncmp`, `strchr`, `strrchr`, `strstr`, `strtok` | direct | caller supplies valid pointers and capacities; `strtok` uses one global saved position |
 | Character classification | `isalpha`, `isdigit`, `isalnum`, `isspace`, `islower`, `isupper`, `isprint`, `isgraph`, `ispunct`, `isxdigit`, `iscntrl`, `toupper`, `tolower` | direct | ASCII behavior only; no locale |
-| Allocation | `malloc`, `free`, `calloc`, `realloc` | direct | fixed heap `0x50000..0x80000`; no invalid-pointer detection, concurrency, or process isolation |
+| Allocation | `malloc`, `free`, `calloc`, `realloc` | direct | fixed 256 KiB heap `0x00180000..0x001BFFFF`; no invalid-pointer detection, concurrency, or process isolation |
 | Conversion/math helpers | `atoi`, `strtol`, `strtoul`, `abs`, `labs` | direct | no `errno`; integer overflow is not diagnosed; `strtoul` shares the signed parser implementation |
 | Algorithms/random | `qsort`, `bsearch`, `rand`, `srand` | direct | `qsort` is a simple quadratic implementation; `bsearch` requires sorted input; deterministic non-cryptographic generator |
 | Definitions | `size_t`, `ptrdiff_t`, `offsetof`, `NULL`, integer limits, `assert` | compile-time | project ABI is 32-bit; `assert` behavior is not an automated test case and a failure terminates through the runtime |
@@ -44,4 +46,4 @@ There is no field padding, precision, sign/alternate format flag, uppercase hexa
 - seeking beyond EOF is allowed, and a later write zero-fills the gap through the filesystem's cleared-block behavior;
 - file size is limited by the 4,096-block data region.
 
-Executable tests in `transport/lib_test/` compare exact strings, bytes, return values, stream flags, allocation behavior, BSS state, and multi-block file contents. Their success markers are asserted by `make test` in QEMU.
+Executable tests in `transport/lib_test/` compare exact strings, bytes, return values, stream flags, allocation behavior, BSS state, application-stack use, and multi-block file contents. Their success markers and the kernel's adjacent memory guards are asserted by `make test` in QEMU.

@@ -3,10 +3,12 @@
 ; ----------------------------
 ; IDT & System Call Module
 ; ----------------------------
-IDT_BASE equ 0x26000
+%if IDT_SIZE != 256 * 8
+    %error "IDT_SIZE must describe all 256 eight-byte entries"
+%endif
 
 idt_descriptor:
-    dw (256 * 8) - 1
+    dw IDT_SIZE - 1
     dd IDT_BASE
 
 idt_init:
@@ -14,9 +16,9 @@ idt_init:
     push ecx
     push edi
 
-    ; Zero IDT memory at 0x26000 (2048 bytes)
+    ; Zero the complete shared-layout IDT region.
     mov edi, IDT_BASE
-    mov ecx, 256 * 8
+    mov ecx, IDT_SIZE
     call zero_buffer
 
     ; Register int 0x80 (syscall) at entry 0x80 (128)
@@ -105,7 +107,7 @@ syscall_entry:
 .clear_ft_done:
 
     ; Reset heap break pointer for next application run
-    mov dword [current_brk], 0x00050000
+    mov dword [current_brk], APP_HEAP_BASE
     ; Restore Shell stack and return to Shell
     mov esp, [saved_kernel_esp]
     jmp strict dword return_to_shell
@@ -114,9 +116,9 @@ syscall_entry:
     test ebx, ebx
     jz .sys_brk_done
 
-    cmp ebx, 0x00050000
+    cmp ebx, APP_HEAP_BASE
     jb .sys_brk_done
-    cmp ebx, 0x00080000
+    cmp ebx, APP_HEAP_END
     ja .sys_brk_done
 
     mov [current_brk], ebx
@@ -1025,7 +1027,7 @@ saved_cursor_col dd 0
 saved_vga_buffer times 4000 db 0
 
 tmp_read_cnt dd 0
-current_brk dd 0x00050000
+current_brk dd APP_HEAP_BASE
 tmp_fd_slot dd 0
 tmp_open_flags dd 0
 tmp_open_inode dd 0

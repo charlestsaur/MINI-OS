@@ -19,13 +19,13 @@ The documentation and some comments were written by Gemini and GPT. A small part
 
 ## Current Features
 
-- BIOS boot loader with EDD probing, per-sector retries, and CHS fallback
+- BIOS boot loader with firmware memory checks, EDD probing, per-sector retries, CHS fallback, and verified A20 enablement before high memory is used
 - Protected-mode kernel image at `0x8000`, beginning with an executable entry jump to `kernel_start`
 - VGA text console and polling keyboard input
 - checked ATA PIO disk I/O (`LBA28`, primary-channel master sector read/write) with boot-image identity verification before mount
 - Custom filesystem with persistent directory tree and fail-stop detection of interrupted mutations
 - IDT Interrupt Table & `int 0x80` System Call Engine for console, heap, file, and cursor services
-- FAT-chain executable loader (`run <file>`) for flat binaries up to 64 KiB at `0x00040000`
+- FAT-chain executable loader (`run <file>`) for flat binaries up to 512 KiB at `0x00100000`
 - Modern-C runtime implementation with **Dynamic Memory Allocation (`malloc`/`free`/`realloc`/`calloc`)**
 - Tested API subset exposed through `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<ctype.h>`, `<limits.h>`, `<stddef.h>`, and `<assert.h>`
 - Host-side transactional disk transport tool (`tools/inject_transport.c`) for injecting `/transport/` files without exposing a partial output image
@@ -35,9 +35,9 @@ The documentation and some comments were written by Gemini and GPT. A small part
 
 - `OS_src/boot/`: bootloader sources
 - `OS_src/kernel/`: kernel, shell, drivers, filesystem, IDT & syscalls, and utilities
-- `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`)
+- `tools/`: host build tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
 - `transport/`: host files injected into `/transport/` on disk image
-  - `transport/lib/`: modern-C runtime library, `crt0.asm`, and standard C header wrappers
+  - `transport/lib/`: modern-C runtime and compiler helpers, network/SSH implementation directories, `crt0.asm`, and C90-compatible public headers
   - `transport/apps/`: strict C90 applications (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
   - `transport/lib_test/`: strict C90 executable tests, including BSS coverage
   - `transport/build/`: compiled flat output binaries (`apps/*.bin`, `lib_test/*.bin`)
@@ -52,7 +52,8 @@ The documentation and some comments were written by Gemini and GPT. A small part
 - `ld.lld` when available; otherwise the built-in `elf2bin` path is used
 - `qemu-system-i386`
 - Python 3.9 or newer for automated tests
-- standard shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
+- standard shell tools used by `Makefile` (`awk`, `dd`, `expr`, `find`, `grep`, `mkdir`, `printf`, `rm`, `tr`, `wc`)
+- `bash`, `git`, `nm`, and `objdump` for the optional pinned network feasibility build, plus `patch` for its optional host heap probe
 
 ## Build and Run
 
@@ -69,6 +70,7 @@ Build artifacts:
 - `build/inject_transport`
 - `build/elf2bin`
 - `build/check_image`
+- `build/check_layout`
 - `build/mini_os.img`
 
 The image target always runs the read-only integrity checker. Run the complete automated suite with `make test`.
@@ -111,6 +113,7 @@ The generated image is exactly 4,471 sectors (2,289,152 bytes).
 
 - Project overview: `docs/Project_Overview.md`
 - Architecture: `docs/Architecture.md`
+- Physical memory layout: `docs/Memory_Layout.md`
 - Code structure: `docs/Code_Structure.md`
 - Build and run: `docs/Build_and_Run.md`
 - Shell and usage: `docs/Shell_and_Usage.md`

@@ -6,6 +6,8 @@ This document only describes code/file responsibilities.
 
 - `OS_src/boot/boot.asm`
   - EDD detection, bounded one-sector reads, retries, disk resets, and CHS fallback
+  - conventional and extended physical-memory checks before the kernel is loaded or protected-mode fixed regions are used
+  - fast A20 enablement and physical alias verification before protected mode
   - fixed location for the host-generated per-image boot identity
   - GDT setup and protected-mode jump
 
@@ -13,9 +15,12 @@ This document only describes code/file responsibilities.
 
 - `OS_src/kernel/main.asm`
   - kernel image origin (`[org 0x8000]`) and first-byte jump to `kernel_start`
-  - global constants (VGA, ATA, filesystem layout)
+  - complete kernel-stack clearing and lower-canary initialization before the first call
+  - global constants (VGA, ATA, filesystem layout) and compile-time platform-layout assertions
   - global state buffers and scratch variables
   - includes shell/fs/driver/utility modules
+- `OS_src/kernel/platform_layout.def`
+  - shared boot, kernel, work-buffer, network-buffer, application-image, heap, argument, stack, canary, configured-memory, and firmware-required-memory constants
 
 ## 3. Shell Layer
 
@@ -45,6 +50,7 @@ This document only describes code/file responsibilities.
   - memory clear/copy
   - string/name copy
   - case-insensitive compare helpers
+  - fixed-buffer initialization, application-memory initialization, interrupt-stack boundary exercise, and shared canary verification
 
 ## 7. Filesystem Modules
 
@@ -67,15 +73,22 @@ This document only describes code/file responsibilities.
   - reusable read-only boot-identity, mutation-marker, geometry, inode, directory, FAT-chain, reachability, and allocation-ownership verifier
   - command-line checker and the injector's pre-rename commit gate share the same implementation
 - `tools/elf2bin.c`
-  - host C 32-bit ELF linker and flat binary generator
+  - host C 32-bit ELF linker and flat binary generator with checked output, object, global-symbol, per-object-section, and relocation capacities
+- `tools/check_layout.c`
+  - host C verifier for platform-memory consistency, bounds, alignment, containment, adjacency, and pairwise non-overlap
 - `transport/lib/`
   - `crt0.asm`: C runtime startup file (`_start`)
   - `minilibc.h` / `minilibc.c`: modern-C runtime implementation and heap allocator
+  - `compiler_rt.c`: modern-C unsigned 64-bit division and remainder helpers linked only where required
+  - `net/`: modern-C network implementation directory
+  - `ssh/`: modern-C SSH implementation directory
   - `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `limits.h`, `stddef.h`, `assert.h`: standard C header wrappers
+- `transport/app.ld`
+  - shared high-memory application section placement and complete allocatable-image assertion for the `ld.lld` path
 - `transport/apps/`
   - strict C90 application sources (`hello.c`, `calc.c`, `guess.c`, `banner.c`, `vedit.c`)
 - `transport/lib_test/`
-  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, and `test_bss.c`
+  - strict C90 executable assertions in `test_string.c`, `test_heap.c`, `test_file.c`, `test_no_space.c`, `test_bss.c`, `test_stack.c`, and the isolated fail-stop probe `test_guard.c`
 - `transport/build/`
   - compiled flat binary outputs (`apps/*.bin`, `lib_test/*.bin`)
 
@@ -84,12 +97,14 @@ This document only describes code/file responsibilities.
 - `Makefile`
   - source path selection
   - build rules for boot/kernel/image/tool/apps
+  - strict-C90 application and modern-C library policies with per-application network and SSH object selection
+  - shared layout-derived linker, loader-capacity, kernel-reservation, and QEMU-memory values
   - mandatory final-image integrity check
-  - run, test, and clean targets
+  - normal and network QEMU run targets plus test and clean targets
 
 ## 10. Automated Test Drivers
 
 - `tests/qemu_e2e.py`
-  - boots temporary debug images, drives the shell, asserts application and multi-block filesystem behavior, restarts and checks persistent state, injects an ATA write error, verifies wrong-device refusal, and exercises the supported QEMU machine/CHS matrix
+  - boots temporary debug images, checks insufficient-memory and A20 failures, proves every canary-corruption fail-stop branch, checks the network launch configuration, drives the shell, asserts application guards and multi-block filesystem behavior, restarts and checks persistent state, injects ATA faults, verifies wrong-device refusal, and exercises the supported QEMU machine/CHS matrix
 - `tests/test_build.py`
-  - checks clean and incremental builds, C language policy, dependency edges, checker rejection, both flat-binary link paths, and every before/after sector-write failure point in the host injector transaction
+  - checks clean and incremental builds, C language policy, per-application dependencies, layout assertions, parameterized linker limits, both exact-limit flat-binary paths, checker rejection, and every before/after sector-write failure point in the host injector transaction

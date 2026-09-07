@@ -9,6 +9,8 @@
 - Probes BIOS EDD support and loads the kernel one sector at a time with three attempts per sector and disk resets between failed attempts.
 - Falls back to BIOS CHS reads when EDD is unavailable or its read path fails.
 - Advances the destination segment by 512 bytes per request, so no BIOS transfer buffer crosses a 64 KiB segment boundary.
+- Requires firmware-reported conventional RAM through `0x00095000` and contiguous extended RAM through `0x001CB000` before loading the kernel or using the protected-mode fixed regions.
+- Enables the fast A20 gate and verifies that physical addresses one MiB apart no longer alias before entering protected mode.
 - Initializes temporary execution environment (segments/stack/GDT).
 - Carries the host-generated image identity in immutable boot-sector bytes.
 - Performs protected-mode transition.
@@ -27,7 +29,7 @@
 - File: `OS_src/kernel/shell.asm`
 - Tokenizes command line (`cmd arg1 arg2`).
 - Dispatches operations to filesystem wrappers and executable loader (`run`).
-- Implements `shell_run`: validates and follows an executable FAT chain, loads a maximum 64 KiB image at `0x00040000`, switches the stack to `0x0008F000`, and executes it.
+- Implements `shell_run`: validates and follows an executable FAT chain, loads a maximum 512 KiB image at `0x00100000`, switches to the bounded application stack ending at `0x001CB000`, and executes it.
 - Converts error codes into user-facing messages.
 
 ### Layer 2: Drivers
@@ -40,15 +42,19 @@
 ### Layer 3: Storage and Utilities
 
 - File: `OS_src/kernel/fs/*.asm`
-  
+
   Implements metadata lifecycle, path handling, directory mutation, and inode/block allocation.
 
 - File: `OS_src/kernel/utils.asm`
-  
-  Shared low-level primitives: zero/copy/string/compare helpers.
+
+  Shared low-level primitives: zero/copy/string/compare helpers plus memory-region initialization and canary verification.
+
+- File: `OS_src/kernel/platform_layout.def`
+
+  Single source of truth for boot, kernel, buffer, image, heap, argument, stack, canary, configured-memory, and firmware-required-memory constants.
 
 - File: `tools/inject_transport.c`
-  
+
   Host-side C tool that parses MINI-OS filesystem structures and injects the host `transport/` tree at `/transport/` during `make`.
 
   It performs all changes on a same-directory temporary copy and exposes them with a final atomic rename.
@@ -103,13 +109,15 @@ The marker detects an ambiguous result, but it does not guarantee that earlier s
 
 - Resolve the file inode through path lookup.
 - Verify that the target is a regular file (`type == 1`).
-- Require a nonzero byte size no greater than 64 KiB and an exact `ceil(size / 512)` block count.
+- Require a nonzero byte size no greater than 512 KiB and an exact `ceil(size / 512)` block count.
 - Validate the complete FAT chain, including range, cycle, and final-EOC checks, before changing the application image.
-- Clear `0x00040000..0x0004FFFF`, then follow the FAT chain and read each data block into `0x00040000 + i * 512`.
-- Copy bounded argument strings and build `argv` at `0x0008E000`.
+- Clear `0x00100000..0x0017FFFF`, then follow the FAT chain and read each data block into `0x00100000 + i * 512`.
+- Clear the application heap, argument block, and stack, then install adjacent heap and stack canaries before execution.
+- Copy bounded argument strings and build `argv` in `0x001C1000..0x001C1FFF`.
 - Save the shell stack pointer in `[saved_kernel_esp]`.
-- Set `esp = 0x0008F000` and call `0x00040000`.
+- Set `esp = 0x001CB000` and call `0x00100000`.
 - On `sys_exit` (`int 0x80`, `eax=1`), restore `[saved_kernel_esp]` in `syscall_entry` and jump to `return_to_shell`.
+- Before returning to the prompt, verify the kernel-stack, interrupt-stack, heap, and application-stack canaries and halt on corruption.
 
 Applications are trusted Ring 0 code in the kernel's flat address space.
 
@@ -131,26 +139,11 @@ The syscall ABI organizes application access to kernel services, but it does not
 - Update the inode parent and name.
 - Clear the source entry.
 
-## Memory Map & Static Buffers
+## Memory Map and Static Buffers
 
-The kernel uses explicit physical memory regions for buffers and execution:
+The checked physical map, firmware gates, initialization lifecycle, guard behavior, and current isolation limits are defined in [`Memory_Layout.md`](Memory_Layout.md).
 
-- `0x00007C00`: Bootloader MBR
-- `0x00008000`: Kernel code & data (`kernel.bin`)
-- `0x00020000`: `BUF_SUPERBLOCK`
-- `0x00021000`: `BUF_BITMAP`
-- `0x00022000`: `BUF_SECTOR`
-- `0x00023000`: `BUF_TEXT`
-- `0x00024000`: `BUF_INODE`
-- `0x00025000`: `BUF_CMD`
-- `0x00026000`: `IDT_BASE` (2048-byte IDT table)
-- `0x00040000..0x0004FFFF`: Application image (64 KiB maximum)
-- `0x00050000..0x0007FFFF`: Application heap
-- `0x0008E000..0x0008E10B`: Argument strings and `argv` pointers
-- `0x0008F000`: Application Stack Pointer (grows downwards)
-- `0x00090000`: Kernel Stack Pointer (grows downwards)
-
-This avoids dynamic memory management and keeps flows explicit.
+The QEMU configuration remains 4 MiB, while the bootloader separately verifies only the conventional and extended spans that the current fixed allocations actually touch.
 
 ## Error Strategy
 

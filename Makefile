@@ -4,9 +4,20 @@ BOOT_SRC := $(SRC_DIR)/boot/boot.asm
 KERNEL_SRC := $(SRC_DIR)/kernel/main.asm
 KERNEL_DEPS := $(shell find $(SRC_DIR)/kernel -type f \( -name '*.asm' -o -name '*.def' \) | sort) transport/lib/syscall.def
 FS_LAYOUT_DEF := $(SRC_DIR)/kernel/fs/layout.def
+PLATFORM_LAYOUT_DEF := $(SRC_DIR)/kernel/platform_layout.def
+APP_LINKER_SCRIPT := transport/app.ld
 FS_DATA_START_LBA := $(shell grep FS_DATA_START_LBA $(FS_LAYOUT_DEF) | tr -cd '0-9\n')
 FS_DATA_BLOCK_COUNT := $(shell grep FS_DATA_BLOCK_COUNT $(FS_LAYOUT_DEF) | tr -cd '0-9\n')
 OS_SECTORS := $(shell expr $(FS_DATA_START_LBA) + $(FS_DATA_BLOCK_COUNT))
+
+layout_value = $(strip $(shell awk -F '[(),[:space:]]+' '$$2 == "$(1)" { print $$3 }' $(PLATFORM_LAYOUT_DEF)))
+APP_IMAGE_BASE := $(call layout_value,APP_IMAGE_BASE)
+APP_IMAGE_SIZE := $(call layout_value,APP_IMAGE_SIZE)
+KERNEL_IMAGE_MAX_SIZE := $(call layout_value,KERNEL_IMAGE_MAX_SIZE)
+PLATFORM_CONFIGURED_MEMORY_BYTES := $(call layout_value,PLATFORM_CONFIGURED_MEMORY_BYTES)
+MAX_APP_IMAGE_SIZE := $(shell printf '%d' $(APP_IMAGE_SIZE))
+KERNEL_MAX_SECTORS := $(shell printf '%d' $$(( $(KERNEL_IMAGE_MAX_SIZE) / 512 )))
+QEMU_MEMORY_MB := $(shell printf '%d' $$(( $(PLATFORM_CONFIGURED_MEMORY_BYTES) / 1048576 )))
 
 BOOT_BIN := $(BUILD_DIR)/boot.bin
 KERNEL_BIN := $(BUILD_DIR)/kernel.bin
@@ -15,6 +26,7 @@ OS_IMG := $(BUILD_DIR)/mini_os.img
 INJECT_TOOL := $(BUILD_DIR)/inject_transport
 ELF2BIN_TOOL := $(BUILD_DIR)/elf2bin
 CHECK_TOOL := $(BUILD_DIR)/check_image
+LAYOUT_TOOL := $(BUILD_DIR)/check_layout
 CHECK_SOURCES := tools/check_image.c tools/check_image.h
 
 LIB_DIR := transport/lib
@@ -25,10 +37,25 @@ APP_OBJ_DIR := $(BUILD_DIR)/transport
 
 CRT0_SRC := $(LIB_DIR)/crt0.asm
 MINILIBC_SRC := $(LIB_DIR)/minilibc.c
-LIB_HEADERS := $(wildcard $(LIB_DIR)/*.h) $(LIB_DIR)/syscall.def
+COMPILER_RT_SRC := $(LIB_DIR)/compiler_rt.c
+LIB_HEADERS := $(shell find $(LIB_DIR) -type f -name '*.h' | sort) $(LIB_DIR)/syscall.def
 
 CRT0_OBJ := $(BUILD_DIR)/crt0.o
 MINILIBC_OBJ := $(BUILD_DIR)/minilibc.o
+COMPILER_RT_OBJ := $(BUILD_DIR)/compiler_rt.o
+
+NET_LIB_SRCS := $(shell find $(LIB_DIR)/net -type f -name '*.c' 2>/dev/null | sort)
+SSH_LIB_SRCS := $(shell find $(LIB_DIR)/ssh -type f -name '*.c' 2>/dev/null | sort)
+NET_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(NET_LIB_SRCS))
+SSH_LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(APP_OBJ_DIR)/lib/%.o,$(SSH_LIB_SRCS))
+NETWORK_APP_NAMES := ping netcat ssh
+SSH_APP_NAMES := ssh
+
+app_component_objects = $(strip $(if $(filter $(NETWORK_APP_NAMES),$(notdir $(1))),$(COMPILER_RT_OBJ) $(NET_LIB_OBJS)) $(if $(filter $(SSH_APP_NAMES),$(notdir $(1))),$(SSH_LIB_OBJS)))
+
+ifneq ($(strip $(NET_LIB_OBJS) $(SSH_LIB_OBJS)),)
+.SECONDARY: $(NET_LIB_OBJS) $(SSH_LIB_OBJS)
+endif
 
 APP_SRCS := $(shell find $(APPS_DIR) $(LIB_TEST_DIR) -name '*.c' 2>/dev/null | sort)
 APP_BINS := $(patsubst transport/%.c,$(APP_BUILD_DIR)/%.bin,$(APP_SRCS))
@@ -41,15 +68,27 @@ LLD := ld.lld
 QEMU := qemu-system-i386
 PYTHON := python3
 
+NETWORK_PHASE0_TOOL := tools/network_phase0/build.sh
+NETWORK_PHASE0_HOST_TOOL := tools/network_phase0/host/build.sh
+NETWORK_PHASE0_OUTPUT ?= $(BUILD_DIR)/network-phase0
+LIBSSH2_SOURCE ?=
+MBEDTLS_SOURCE ?=
+WOLFSSH_SOURCE ?=
+WOLFSSL_SOURCE ?=
+
 TARGET_CFLAGS := -target i386-unknown-none-elf -m32 -march=i386 -mno-sse -mno-mmx -ffreestanding -nostdlib -O2 -I$(LIB_DIR)
 LIB_CFLAGS := $(TARGET_CFLAGS) -std=gnu11
 APP_CFLAGS := $(TARGET_CFLAGS) -std=c90 -pedantic-errors -Wall -Wextra -Werror
 HOST_CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror
-MAX_APP_IMAGE_SIZE := 65536
+ELF2BIN_MAX_OBJECTS ?= 256
+ELF2BIN_MAX_SYMBOLS ?= 4096
+ELF2BIN_MAX_SECTIONS ?= 4096
+ELF2BIN_MAX_RELOCATIONS ?= 32768
+QEMU_MEMORY ?= $(QEMU_MEMORY_MB)M
 
-.PHONY: all clean run apps app check-image test test-build test-e2e
+.PHONY: all clean run run-network apps app check-layout check-image test test-build test-e2e network-phase0-check network-phase0-selected network-phase0 network-phase0-host-probe
 
-all: $(OS_IMG)
+all: check-layout $(OS_IMG)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -66,24 +105,39 @@ $(ELF2BIN_TOOL): tools/elf2bin.c Makefile | $(BUILD_DIR)
 $(CHECK_TOOL): $(CHECK_SOURCES) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	$(CC) $(HOST_CFLAGS) tools/check_image.c -o $(CHECK_TOOL)
 
+$(LAYOUT_TOOL): tools/check_layout.c $(PLATFORM_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+	$(CC) $(HOST_CFLAGS) tools/check_layout.c -o $(LAYOUT_TOOL)
+
+check-layout: $(LAYOUT_TOOL)
+	$(LAYOUT_TOOL)
+
 $(CRT0_OBJ): $(CRT0_SRC) Makefile | $(BUILD_DIR)
 	$(NASM) -f elf32 $(CRT0_SRC) -o $(CRT0_OBJ)
 
 $(MINILIBC_OBJ): $(MINILIBC_SRC) $(LIB_HEADERS) Makefile | $(BUILD_DIR)
 	$(CLANG) $(LIB_CFLAGS) -c $(MINILIBC_SRC) -o $(MINILIBC_OBJ)
 
+$(COMPILER_RT_OBJ): $(COMPILER_RT_SRC) Makefile | $(BUILD_DIR)
+	$(CLANG) $(LIB_CFLAGS) -c $(COMPILER_RT_SRC) -o $(COMPILER_RT_OBJ)
+
+$(APP_OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.c $(LIB_HEADERS) Makefile | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CLANG) $(LIB_CFLAGS) -c $< -o $@
+
 # Generic rule to compile any C app or library test under transport/
-$(APP_BUILD_DIR)/%.bin: transport/%.c $(LIB_HEADERS) $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) Makefile | $(BUILD_DIR) $(APP_BUILD_DIR)
+.SECONDEXPANSION:
+$(APP_BUILD_DIR)/%.bin: transport/%.c $(LIB_HEADERS) $(CRT0_OBJ) $(MINILIBC_OBJ) $(ELF2BIN_TOOL) $(LAYOUT_TOOL) $(APP_LINKER_SCRIPT) $$(call app_component_objects,$$*) Makefile | $(BUILD_DIR) $(APP_BUILD_DIR)
 	@echo "Compiling C binary '$<'..."
 	@mkdir -p $(dir $@)
 	@mkdir -p $(dir $(APP_OBJ_DIR)/$*.o)
+	@$(LAYOUT_TOOL) >/dev/null
 	$(CLANG) $(APP_CFLAGS) -c $< -o $(APP_OBJ_DIR)/$*.o
 	@if command -v $(LLD) >/dev/null 2>&1; then \
 		echo "Linking '$@' with ld.lld..."; \
-		$(LLD) -m elf_i386 --image-base 0x40000 -Ttext 0x40000 --oformat binary $(CRT0_OBJ) $(APP_OBJ_DIR)/$*.o $(MINILIBC_OBJ) -o $@; \
+		$(LLD) -m elf_i386 --orphan-handling=error --defsym=APP_LINK_BASE=$(APP_IMAGE_BASE) --defsym=APP_LINK_SIZE=$(APP_IMAGE_SIZE) -T $(APP_LINKER_SCRIPT) --oformat binary $(CRT0_OBJ) $(APP_OBJ_DIR)/$*.o $(MINILIBC_OBJ) $(call app_component_objects,$*) -o $@; \
 	else \
 		echo "ld.lld not found; linking '$@' with elf2bin..."; \
-		$(ELF2BIN_TOOL) $@ 0x40000 $(CRT0_OBJ) $(APP_OBJ_DIR)/$*.o $(MINILIBC_OBJ); \
+		$(ELF2BIN_TOOL) --max-output $(MAX_APP_IMAGE_SIZE) --max-objects $(ELF2BIN_MAX_OBJECTS) --max-symbols $(ELF2BIN_MAX_SYMBOLS) --max-sections $(ELF2BIN_MAX_SECTIONS) --max-relocations $(ELF2BIN_MAX_RELOCATIONS) $@ $(APP_IMAGE_BASE) $(CRT0_OBJ) $(APP_OBJ_DIR)/$*.o $(MINILIBC_OBJ) $(call app_component_objects,$*); \
 	fi
 	@APP_SIZE=$$(wc -c < $@); \
 	if [ $$APP_SIZE -gt $(MAX_APP_IMAGE_SIZE) ]; then \
@@ -108,14 +162,15 @@ app:
 	fi; \
 	$(MAKE) $(APP_BUILD_DIR)/apps/$$APP_NAME.bin
 
-$(KERNEL_BIN): $(KERNEL_DEPS) Makefile | $(BUILD_DIR)
+$(KERNEL_BIN): $(KERNEL_DEPS) $(PLATFORM_LAYOUT_DEF) $(LAYOUT_TOOL) Makefile | $(BUILD_DIR)
+	@$(LAYOUT_TOOL) >/dev/null
 	$(NASM) -f bin $(KERNEL_SRC) -o $(KERNEL_BIN)
 
-$(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) $(FS_LAYOUT_DEF) Makefile | $(BUILD_DIR)
+$(BOOT_BIN): $(BOOT_SRC) $(KERNEL_BIN) $(FS_LAYOUT_DEF) $(PLATFORM_LAYOUT_DEF) Makefile | $(BUILD_DIR)
 	@KERNEL_SIZE=$$(wc -c < $(KERNEL_BIN)); \
 	KERNEL_SECTORS=$$(( (KERNEL_SIZE + 511) / 512 )); \
-	if [ $$KERNEL_SECTORS -gt 100 ]; then \
-		echo "error: kernel is $$KERNEL_SECTORS sectors, exceeds reserved 100-sector area (LBA 1-100)."; \
+	if [ $$KERNEL_SECTORS -gt $(KERNEL_MAX_SECTORS) ]; then \
+		echo "error: kernel is $$KERNEL_SECTORS sectors, exceeds reserved $(KERNEL_MAX_SECTORS)-sector area (LBA 1-$(KERNEL_MAX_SECTORS))."; \
 		exit 1; \
 	fi; \
 	$(NASM) -f bin -d KERNEL_SECTORS=$$KERNEL_SECTORS $(BOOT_SRC) -o $(BOOT_BIN)
@@ -136,7 +191,31 @@ $(OS_IMG): $(BOOT_BIN) $(KERNEL_BIN) $(INJECT_TOOL) $(CHECK_TOOL) $(APP_BINS) $(
 check-image: $(OS_IMG) $(CHECK_TOOL)
 	$(CHECK_TOOL) $(OS_IMG)
 
-test-build:
+network-phase0-check:
+	bash $(NETWORK_PHASE0_TOOL) --check-manifest
+
+network-phase0-selected: network-phase0-check
+	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ]; then \
+		echo "Usage: make network-phase0-selected LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls"; \
+		exit 1; \
+	fi
+	bash $(NETWORK_PHASE0_TOOL) selected "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+
+network-phase0: network-phase0-check
+	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ] || [ -z "$(WOLFSSH_SOURCE)" ] || [ -z "$(WOLFSSL_SOURCE)" ]; then \
+		echo "Usage: make network-phase0 LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls WOLFSSH_SOURCE=/path/to/wolfssh WOLFSSL_SOURCE=/path/to/wolfssl"; \
+		exit 1; \
+	fi
+	bash $(NETWORK_PHASE0_TOOL) all "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(WOLFSSH_SOURCE)" "$(WOLFSSL_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+
+network-phase0-host-probe: network-phase0-check
+	@if [ -z "$(LIBSSH2_SOURCE)" ] || [ -z "$(MBEDTLS_SOURCE)" ]; then \
+		echo "Usage: make network-phase0-host-probe LIBSSH2_SOURCE=/path/to/libssh2 MBEDTLS_SOURCE=/path/to/mbedtls"; \
+		exit 1; \
+	fi
+	bash $(NETWORK_PHASE0_HOST_TOOL) "$(LIBSSH2_SOURCE)" "$(MBEDTLS_SOURCE)" "$(NETWORK_PHASE0_OUTPUT)"
+
+test-build: network-phase0-check
 	$(PYTHON) tests/test_build.py
 
 test-e2e: $(OS_IMG) $(CHECK_TOOL)
@@ -145,7 +224,10 @@ test-e2e: $(OS_IMG) $(CHECK_TOOL)
 test: test-build test-e2e
 
 run: $(OS_IMG)
-	$(QEMU) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk
+	$(QEMU) -m $(QEMU_MEMORY) -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk
+
+run-network: $(OS_IMG)
+	$(QEMU) -m $(QEMU_MEMORY) -accel tcg -cpu max,rdrand=on -drive file=$(OS_IMG),format=raw,if=ide,index=0,media=disk -netdev user,id=net0 -device ne2k_isa,netdev=net0,iobase=0x300,irq=9,mac=52:54:00:12:34:56
 
 clean:
 	rm -rf $(BUILD_DIR) $(APP_BUILD_DIR)

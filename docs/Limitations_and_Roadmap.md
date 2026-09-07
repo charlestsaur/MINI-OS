@@ -4,13 +4,16 @@ This file documents current limitations only.
 
 ## Platform And Runtime
 
-- Single-task execution model (executes raw flat binaries loaded at `0x00040000`).
+- Single-task execution model that executes raw flat binaries in the 512 KiB image region beginning at `0x00100000`.
 - System calls via `int 0x80` for console, heap, file, and cursor services; `Syscall_ABI.md` documents all implemented calls and their register contract.
-- Dynamic heap memory allocation (`malloc`, `free`, `realloc`, `calloc`) managed by `sys_brk` (heap space `0x00050000` to `0x00080000`).
+- Dynamic heap memory allocation (`malloc`, `free`, `realloc`, `calloc`) managed by `sys_brk` in the fixed 256 KiB region `0x00180000..0x001BFFFF`.
 - A tested runtime subset exposed through familiar C headers; unsupported functions and reduced contracts are listed in `Library_Support.md`.
 - No Ring 3 hardware process isolation; user applications and kernel share Ring 0 flat protected mode.
 - No virtual memory or paging.
+- Physical memory uses a checked fixed layout with legacy BIOS span checks, but there is no full E820 map parser or physical-page allocator.
+- Memory canaries detect selected heap and downward-stack boundary corruption only after control reaches a verification point; they do not prevent writes or provide recovery.
 - No interrupt-driven scheduling.
+- No production network driver, protocol stack, or SSH application exists yet.
 
 ## Filesystem And Storage
 
@@ -41,8 +44,8 @@ This file documents current limitations only.
 
 ## Testing And Tooling
 
-- Automated QEMU tests cover library assertions, multi-block file I/O, append/move/remove behavior, persistence, deterministic ATA read/write faults, partial-write exhaustion, wrong-device refusal, three forced-CHS geometries, default PC, and `isapc`.
-- Automated build tests cover the language-policy split, relevant dependency rebuilds, no-op builds, both flat-binary link paths, dirty-image rejection, every host-injector sector-write failure point before and after flush, and every final transaction stage including the full pre-rename integrity gate.
+- Automated QEMU tests cover insufficient-memory and A20 failures, positive and deliberately corrupted memory-canary paths, the explicit network launch configuration, library assertions, multi-block file I/O, append/move/remove behavior, persistence, deterministic ATA read/write faults, partial-write exhaustion, wrong-device refusal, three forced-CHS geometries, default PC, and `isapc`.
+- Automated build tests cover layout overlap and invalid firmware/configured-memory boundaries, strict-C90 application and modern-C library separation, per-application network/SSH dependencies, all parameterized `elf2bin` capacities, exact-limit and overflowing images, relevant dependency rebuilds, no-op builds, both flat-binary link paths, dirty-image rejection, every host-injector sector-write failure point before and after flush, and every final transaction stage including the full pre-rename integrity gate.
 - Physical-machine compatibility remains unverified because firmware USB-to-legacy-ATA mapping varies and cannot be established by emulator coverage.
 
 ## Summary

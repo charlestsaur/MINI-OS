@@ -109,12 +109,14 @@ Loads and executes a raw binary application from disk.
 
 - resolves target file Inode and verifies regular file type (`INODE_TYPE == 1`)
 - validates that the byte size, block count, and complete FAT chain agree
-- follows the FAT chain and loads at most 64 KiB into `0x00040000..0x0004FFFF`
-- clears the complete 64 KiB image region before loading, including space used by the flat binary's zero-initialized data
-- rejects an executable path longer than 79 bytes and a second token longer than 175 bytes
+- follows the FAT chain and loads at most 512 KiB into `0x00100000..0x0017FFFF`
+- clears the complete 512 KiB image region before loading, including space used by the flat binary's zero-initialized data
+- clears the 256 KiB application heap, 4 KiB argument block, and 32 KiB application stack before each run
+- installs adjacent heap and application-stack canaries and verifies them before returning to the prompt
+- rejects an executable path that does not fit its 256-byte argument field and a second token that does not fit its 512-byte field
 - saves kernel Shell stack pointer in `[saved_kernel_esp]`
-- sets application stack pointer `esp = 0x0008F000`
-- jumps to `0x00040000`
+- sets application stack pointer `esp = 0x001CB000`
+- jumps to `0x00100000`
 - trusted Ring 0 application executes in the kernel address space and invokes services via `int 0x80`; the complete ABI is in `docs/Syscall_ABI.md`
 - upon `sys_exit` (`int 0x80`, `eax=1`), kernel restores `[saved_kernel_esp]` and cleanly returns to Shell prompt
 
@@ -162,6 +164,8 @@ command [argument1 [argument2]]
 ```
 
 Spaces separate tokens. Quoting and escaping are not implemented, names cannot contain spaces, and tokens after `argument2` are ignored.
+
+The interactive command line accepts at most 127 visible characters before its terminator.
 
 Consequently `run` supports an executable path and at most one application argument.
 

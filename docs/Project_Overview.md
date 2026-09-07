@@ -11,7 +11,7 @@ The implemented path is end-to-end:
 - `OS_src/boot/`: real-mode boot code and PM transition path
 - `OS_src/kernel/`: shell loop, IDT & syscalls, drivers, utilities
 - `OS_src/kernel/fs/`: filesystem logic
-- `tools/`: host C tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`)
+- `tools/`: host C tools (`inject_transport.c`, `elf2bin.c`, `check_image.c`, `check_layout.c`)
 - `transport/`: host files injected into `/transport/` (strict-C90 apps and tests, modern-C runtime implementation, and `crt0`)
 - `build/`: generated binaries and image
 - `docs/`: documentation set
@@ -19,6 +19,7 @@ The implemented path is end-to-end:
 ## Where to Read Next
 
 - Architecture: `docs/Architecture.md`
+- Physical memory layout: `docs/Memory_Layout.md`
 - Build and run: `docs/Build_and_Run.md`
 - Shell usage: `docs/Shell_and_Usage.md`
 - C90 development guide: `docs/C90_Development_Guide.md`

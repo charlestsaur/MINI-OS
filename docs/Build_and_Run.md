@@ -7,11 +7,11 @@ This document only covers build, image generation, and local execution.
 Required tools:
 
 - `nasm`
-- `cc` for the three modern-C host tools
+- `cc` for the four modern-C host tools
 - `clang` for the freestanding runtime, applications, and tests
 - `ld.lld` when available; otherwise the checked `elf2bin` fallback is selected
 - `qemu-system-i386`
-- shell tools used by `Makefile` (`dd`, `wc`, `mkdir`, `rm`, `grep`, `tr`, `expr`)
+- shell tools used by `Makefile` (`awk`, `dd`, `expr`, `find`, `grep`, `mkdir`, `printf`, `rm`, `tr`, `wc`)
 - Python 3.9 or newer for the automated build and QEMU tests
 
 ## 2. Source and Output Paths
@@ -28,6 +28,7 @@ Build outputs:
 - `build/inject_transport`
 - `build/elf2bin`
 - `build/check_image`
+- `build/check_layout`
 - `build/mini_os.img`
 - `build/transport/apps/*.o`
 - `build/transport/lib_test/*.o`
@@ -45,9 +46,10 @@ make
 
 What happens:
 
+- Build and run the shared platform-memory layout checker.
 - Build the modern-C host tools and runtime library.
 - Compile every application and test with strict C90 diagnostics.
-- Link each flat binary with `ld.lld`, or automatically use `elf2bin` when `ld.lld` is unavailable.
+- Link each flat binary at `0x00100000` with the checked linker script and `ld.lld`, or automatically use the parameterized `elf2bin` path when `ld.lld` is unavailable.
 - Assemble the kernel and compute its boot-time sector count.
 - Create a raw image of exactly 4,471 sectors from the shared `FS_DATA_START_LBA + FS_DATA_BLOCK_COUNT` layout constants.
 - Assert the resulting byte size and write the boot and kernel sectors.
@@ -77,6 +79,22 @@ make app APP=hello.c
 
 Objects retain their source path below `build/transport/`, so an application and a library test may safely share a basename.
 
+### Optional Network Feasibility Build
+
+The optional network feasibility build uses clean external checkouts at fixed commits and never downloads or links them into the normal image.
+
+```bash
+make network-phase0-check
+
+make network-phase0 \
+    LIBSSH2_SOURCE=/path/to/libssh2 \
+    MBEDTLS_SOURCE=/path/to/mbedtls \
+    WOLFSSH_SOURCE=/path/to/wolfssh \
+    WOLFSSL_SOURCE=/path/to/wolfssl
+```
+
+The pinned revisions, probe configuration, generated outputs, and host-probe procedure are documented with the reproducible tooling in [`tools/network_phase0/README.md`](../tools/network_phase0/README.md).
+
 ## 4. Run in QEMU
 
 ```bash
@@ -86,8 +104,14 @@ make run
 Equivalent current action:
 
 ```bash
-qemu-system-i386 -drive file=build/mini_os.img,format=raw,if=ide,index=0,media=disk
+qemu-system-i386 -m 4M -drive file=build/mini_os.img,format=raw,if=ide,index=0,media=disk
 ```
+
+The 4 MiB value is derived from `PLATFORM_CONFIGURED_MEMORY_BYTES` in `OS_src/kernel/platform_layout.def`.
+
+The bootloader separately checks the firmware-reported spans required through `0x00095000` below the legacy-memory hole and through `0x001CB000` above one MiB; the full contract is documented in [`Memory_Layout.md`](Memory_Layout.md).
+
+The network-oriented QEMU configuration can be launched with `make run-network`, which additionally selects QEMU TCG with RDRAND enabled and attaches a user-mode backend to an NE2000 ISA device at I/O base `0x300`, IRQ 9, and MAC address `52:54:00:12:34:56`.
 
 The explicit IDE index is part of the current driver contract because protected-mode filesystem I/O addresses the primary ATA channel's master device directly after the BIOS loads the kernel.
 
@@ -101,15 +125,23 @@ The Makefile checks that kernel size does not exceed reserved area (`100` sector
 
 If exceeded, build stops with an explicit error.
 
-The boot sector probes EDD and reads those sectors individually with retries; if EDD is unavailable or fails, it retries through a CHS fallback.
+Before loading the kernel, the boot sector rejects firmware that cannot provide the low and high contiguous RAM spans required by the shared physical layout.
+
+The boot sector then probes EDD and reads the kernel sectors individually with retries; if EDD is unavailable or fails, it retries through a CHS fallback.
 
 Each request uses offset zero and advances the destination segment, including at the 100-sector build limit, so no request crosses a 64 KiB offset boundary.
 
-Application binaries have a separate 64 KiB build-time limit matching the loader image region.
+After loading the kernel, the boot sector enables the fast A20 gate and verifies non-aliasing with two bytes exactly one MiB apart before entering protected mode.
+
+Application binaries have a separate 512 KiB build-time limit matching `0x00100000..0x0017FFFF`, and the linker script includes zero-initialized placement when enforcing that bound.
+
+The fallback `elf2bin` capacities are explicit Make variables with defaults of 256 input objects, 4,096 unique global symbols, 4,096 sections per object, and 32,768 relocations, while its output limit is always the shared 512 KiB application-image size.
 
 ## 6. Dependency Tracking
 
 The kernel target depends on every assembly/layout include below `OS_src/kernel/`. Runtime and application targets depend on all public runtime headers and `syscall.def`.
+
+Ordinary applications link only `crt0` and `minilibc`, the named network applications `ping`, `netcat`, and `ssh` additionally link the modern-C network objects and compiler runtime, and only `ssh` links the modern-C SSH objects.
 
 The Makefile itself is also an input to generated tools, objects, binaries, and the final image, so flag or recipe changes trigger the required rebuild.
 
@@ -130,7 +162,9 @@ Symptom: image write or cleanup commands fail.
 ## 8. Verification Targets
 
 ```bash
+make check-layout  # verify platform memory sizes, bounds, and non-overlap
 make check-image  # verify the current generated image
+make network-phase0-check  # verify pinned network-probe policy without external sources
 make test-build   # build policy, corruption rejection, and host write-fault transaction checks
 make test-e2e     # QEMU filesystem, persistence, disk-fault, device-safety, and boot-matrix checks
 make test         # all automated gates

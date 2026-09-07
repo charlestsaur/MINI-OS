@@ -37,6 +37,8 @@ Pointer arguments are trusted and are not copied from or validated as user memor
 
 `read` blocks until input is available, echoes accepted characters, handles backspace, and does not place the terminating newline in the destination. `getkey` returns the driver's translated Set 1 key value, including the control codes used by `vedit`.
 
+`brk` starts at `0x00180000`, accepts values through the exclusive heap end `0x001C0000`, and resets to the start when an application exits.
+
 ## Open Flags and File Descriptors
 
 Flags may be combined subject to these rules:
